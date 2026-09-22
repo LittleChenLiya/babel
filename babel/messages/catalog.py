@@ -14,7 +14,7 @@ import datetime
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from copy import copy
+from copy import copy, deepcopy
 from difflib import SequenceMatcher
 from email import message_from_string
 from heapq import nlargest
@@ -38,6 +38,7 @@ __all__ = [
     'Catalog',
     'Message',
     'TranslationError',
+    'merge_catalogs',
 ]
 
 
@@ -1089,3 +1090,463 @@ class Catalog:
             if message_1 is None or message_2 is None or not message_1.is_identical(message_2):
                 return False
         return dict(self.mime_headers) == dict(other.mime_headers)
+
+
+
+class MergeConflict(TypedDict):
+    """Structured description of a single merge conflict.
+
+    ``type`` is ``'catalog'`` for catalog-level conflicts (locale or
+    plural-forms mismatches) and ``'message'`` for message-level conflicts.
+    ``base``, ``local`` and ``incoming`` hold the conflicting values (or
+    serialized message data for whole-message conflicts); a value of ``None``
+    on the message level means the message is absent on that side.
+    """
+
+    type: str
+    reason: str
+    context: str | None
+    msgid: str | list[str] | None
+    field: str | None
+    base: object
+    local: object
+    incoming: object
+
+
+def _merge_norm(value):
+    """Normalize a message id/string for comparison (tuples, not lists)."""
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    return value
+
+
+def _merge_key(message: Message) -> tuple[str | None, str | tuple[str, ...]]:
+    """Identity of a message for merging: (context, full msgid).
+
+    The full msgid is used, so a singular message and a pluralizable message
+    sharing the same singular form are never merged into one item, and two
+    pluralizable messages with different plural msgids stay distinct.
+    """
+    return (message.context, _merge_norm(message.id))
+
+
+def _catalog_entries(
+    catalog: Catalog,
+) -> dict[tuple[str | None, str | tuple[str, ...]], tuple[str, Message]]:
+    """Index active and obsolete messages of a catalog by merge key."""
+    entries: dict[tuple[str | None, str | tuple[str, ...]], tuple[str, Message]] = {}
+    for message in catalog._messages.values():
+        entries[_merge_key(message)] = ('active', message)
+    for message in catalog.obsolete.values():
+        entries[_merge_key(message)] = ('obsolete', message)
+    return entries
+
+
+def _entry_equal(
+    a: tuple[str, Message] | None,
+    b: tuple[str, Message] | None,
+) -> bool:
+    """Whether two catalog entries (state + message) are equivalent."""
+    if a is None or b is None:
+        return a is None and b is None
+    (state_a, msg_a), (state_b, msg_b) = a, b
+    return (
+        state_a == state_b
+        and _merge_norm(msg_a.string) == _merge_norm(msg_b.string)
+        and list(msg_a.auto_comments) == list(msg_b.auto_comments)
+        and list(msg_a.user_comments) == list(msg_b.user_comments)
+        and set(msg_a.locations) == set(msg_b.locations)
+        and set(msg_a.flags) == set(msg_b.flags)
+        and list(msg_a.previous_id) == list(msg_b.previous_id)
+    )
+
+
+def _three_way(base, local, incoming):
+    """Classic three-way merge of a scalar value.
+
+    Returns ``(value, conflicted)``; on conflict the local value wins.
+    """
+    if local == incoming:
+        return incoming, False
+    if local == base:
+        return incoming, False
+    if incoming == base:
+        return local, False
+    return local, True
+
+
+def _entry_to_data(entry: tuple[str, Message] | None) -> dict | None:
+    """Serialize a catalog entry to JSON-compatible data for conflict records."""
+    if entry is None:
+        return None
+    state, message = entry
+    return {
+        'state': state,
+        'context': message.context,
+        'msgid': list(message.id) if isinstance(message.id, (list, tuple)) else message.id,
+        'msgstr': (
+            list(message.string)
+            if isinstance(message.string, (list, tuple))
+            else message.string
+        ),
+        'fuzzy': message.fuzzy,
+        'flags': sorted(message.flags),
+        'auto_comments': list(message.auto_comments),
+        'user_comments': list(message.user_comments),
+        'locations': [[filename, lineno] for filename, lineno in message.locations],
+    }
+
+
+def _record_message_conflict(
+    conflicts: list[MergeConflict],
+    reason: str,
+    key: tuple[str | None, str | tuple[str, ...]],
+    field: str | None,
+    base_value,
+    local_value,
+    incoming_value,
+) -> None:
+    context, msgid = key
+    conflicts.append(
+        MergeConflict(
+            type='message',
+            reason=reason,
+            context=context,
+            msgid=list(msgid) if isinstance(msgid, tuple) else msgid,
+            field=field,
+            base=base_value,
+            local=local_value,
+            incoming=incoming_value,
+        ),
+    )
+
+
+def _merge_message_fields(
+    key: tuple[str | None, str | tuple[str, ...]],
+    base_msg: Message,
+    local_msg: Message,
+    incoming_msg: Message,
+    plural_rules_consistent: bool,
+    conflicts: list[MergeConflict],
+) -> Message:
+    """Field-level three-way merge of three versions of one message.
+
+    Translations (each plural slot separately) and developer (auto) comments
+    are merged three-way against the base; user comments are merged in
+    original order; locations are unioned with stable deduplication; flags
+    are unioned so ``fuzzy`` is never silently dropped.
+    """
+    merged = local_msg.clone()
+
+    if local_msg.pluralizable:
+        base_string = list(_merge_norm(base_msg.string) or ())
+        local_string = list(_merge_norm(local_msg.string) or ())
+        incoming_string = list(_merge_norm(incoming_msg.string) or ())
+        same_shape = len(base_string) == len(local_string) == len(incoming_string)
+        if not plural_rules_consistent or not same_shape:
+            # Never splice plural slots across catalogs with different
+            # plural rules or slot counts.
+            if local_string != incoming_string:
+                _record_message_conflict(
+                    conflicts, 'translation', key, 'string',
+                    base_string, local_string, incoming_string,
+                )
+        else:
+            merged_slots = []
+            for idx, (base_slot, local_slot, incoming_slot) in enumerate(
+                zip(base_string, local_string, incoming_string),
+            ):
+                value, conflicted = _three_way(base_slot, local_slot, incoming_slot)
+                if conflicted:
+                    _record_message_conflict(
+                        conflicts, 'translation', key, f'string[{idx}]',
+                        base_slot, local_slot, incoming_slot,
+                    )
+                merged_slots.append(value)
+            merged.string = tuple(merged_slots)
+    else:
+        value, conflicted = _three_way(base_msg.string, local_msg.string, incoming_msg.string)
+        if conflicted:
+            _record_message_conflict(
+                conflicts, 'translation', key, 'string',
+                base_msg.string, local_msg.string, incoming_msg.string,
+            )
+        merged.string = value
+
+    value, conflicted = _three_way(
+        list(base_msg.auto_comments),
+        list(local_msg.auto_comments),
+        list(incoming_msg.auto_comments),
+    )
+    if conflicted:
+        _record_message_conflict(
+            conflicts, 'auto-comments', key, 'auto_comments',
+            list(base_msg.auto_comments),
+            list(local_msg.auto_comments),
+            list(incoming_msg.auto_comments),
+        )
+    merged.auto_comments = list(value)
+
+    # User comments: ordered union, local order first, then incoming extras.
+    merged.user_comments = list(
+        dict.fromkeys([*local_msg.user_comments, *incoming_msg.user_comments]),
+    )
+    # Locations: union with stable deduplication.
+    merged.locations = list(dict.fromkeys([*local_msg.locations, *incoming_msg.locations]))
+    # Flags: union, so a fuzzy flag is never automatically removed.
+    merged.flags = set(local_msg.flags) | set(incoming_msg.flags)
+    value, _ = _three_way(
+        list(base_msg.previous_id),
+        list(local_msg.previous_id),
+        list(incoming_msg.previous_id),
+    )
+    merged.previous_id = list(value)
+    return merged
+
+
+def _merge_entry(
+    key: tuple[str | None, str | tuple[str, ...]],
+    base_entry: tuple[str, Message] | None,
+    local_entry: tuple[str, Message] | None,
+    incoming_entry: tuple[str, Message] | None,
+    plural_rules_consistent: bool,
+    conflicts: list[MergeConflict],
+) -> tuple[str, Message] | None:
+    """Merge one message entry three-way; returns the merged entry or None."""
+
+    def same_id(left, right):
+        return (
+            left is not None
+            and right is not None
+            and _merge_norm(left[1].id) == _merge_norm(right[1].id)
+        )
+
+    def record(reason):
+        _record_message_conflict(
+            conflicts, reason, key, None,
+            _entry_to_data(base_entry),
+            _entry_to_data(local_entry),
+            _entry_to_data(incoming_entry),
+        )
+
+    if local_entry is None and incoming_entry is None:
+        return None
+
+    if local_entry is None:
+        # Local has no matching key.
+        if not same_id(base_entry, incoming_entry):
+            # Incoming-only addition (base absent or a different id).
+            return incoming_entry
+        if _entry_equal(base_entry, incoming_entry):
+            # Local deleted while incoming kept the base unchanged.
+            return None
+        # Incoming modified what local deleted: the local deletion wins.
+        record('deleted-vs-modified')
+        return None
+
+    if incoming_entry is None:
+        # Incoming has no matching key.
+        if not same_id(base_entry, local_entry):
+            # Local-only addition (base absent or a different id).
+            return local_entry
+        if _entry_equal(base_entry, local_entry):
+            # Incoming deleted while local kept the base unchanged.
+            return None
+        # Local modified what incoming deleted: local wins, recorded.
+        record('deleted-vs-modified')
+        return local_entry
+
+    if not same_id(local_entry, incoming_entry) or (
+        base_entry is not None
+        and not same_id(base_entry, local_entry)
+    ):
+        # The singular/plural structure diverged between the branches.
+        record('msgid-collision')
+        return local_entry
+
+    if _entry_equal(local_entry, incoming_entry):
+        return local_entry
+
+    if base_entry is None:
+        # Same message added independently with different content.
+        record('both-added')
+        return local_entry
+
+    if _entry_equal(base_entry, local_entry):
+        return incoming_entry
+    if _entry_equal(base_entry, incoming_entry):
+        return local_entry
+
+    if base_entry[0] != local_entry[0] or base_entry[0] != incoming_entry[0]:
+        # Both sides moved active/obsolete state differently.
+        record('state-changed')
+        return local_entry
+
+    # Present on all sides in the same state; both sides changed
+    # different fields: merge field by field.
+    merged = _merge_message_fields(
+        key, base_entry[1], local_entry[1], incoming_entry[1],
+        plural_rules_consistent, conflicts,
+    )
+    return (local_entry[0], merged)
+
+
+def merge_catalogs(
+    base: Catalog,
+    local: Catalog,
+    incoming: Catalog,
+) -> tuple[Catalog, list[MergeConflict]]:
+    """Three-way merge of two catalog branches against a common base.
+
+    Merges the changes made in ``local`` and ``incoming`` relative to their
+    common ancestor ``base`` and returns a ``(merged_catalog, conflicts)``
+    tuple.  Neither input catalog is modified.
+
+    Merge strategy
+    --------------
+    * Messages are identified by ``(msgctxt, full msgid)``; a singular
+      message and a pluralizable message are never merged into one item, and
+      no fuzzy similarity matching is used to guess renames.
+    * Each message is merged three-way against ``base``: if only one side
+      changed it, that side wins; if both sides made the same change, the
+      change is kept; if both sides changed it differently, the local
+      version is kept and a structured conflict is recorded.
+    * Translations are compared per plural slot, and developer (auto)
+      comments are compared separately, so independent changes to different
+      slots or fields merge cleanly.
+    * User comments are merged preserving their original order; locations
+      are unioned with stable deduplication; flags are unioned so a
+      ``fuzzy`` flag is never automatically removed.
+    * A deletion on one side combined with a modification on the other side
+      is a conflict; the local version (possibly the deletion) is kept.
+    * Obsolete messages keep their semantics: a message made obsolete (or
+      resurrected) on exactly one side follows that side.
+    * A locale or ``Plural-Forms`` mismatch is a catalog-level conflict, and
+      plural translations are never spliced across catalogs with different
+      plural rules.
+    * The merged catalog inherits its headers, locale and plural settings
+      from ``local``.
+
+    :param base: the common ancestor catalog
+    :param local: the "ours" catalog; wins on conflicts
+    :param incoming: the "theirs" catalog
+    :return: a ``(catalog, conflicts)`` tuple where ``conflicts`` is a list
+             of `MergeConflict` dictionaries that locate each conflict to a
+             specific message (or to the catalog itself)
+
+    .. versionadded:: 2.19
+    """
+    conflicts: list[MergeConflict] = []
+
+    locales = [catalog.locale_identifier for catalog in (base, local, incoming)]
+    if len(set(locales)) > 1:
+        conflicts.append(
+            MergeConflict(
+                type='catalog',
+                reason='locale-mismatch',
+                context=None,
+                msgid=None,
+                field='locale',
+                base=locales[0],
+                local=locales[1],
+                incoming=locales[2],
+            ),
+        )
+
+    plural_forms = [catalog.plural_forms for catalog in (base, local, incoming)]
+    plural_rules_consistent = len(set(plural_forms)) <= 1
+    if not plural_rules_consistent:
+        conflicts.append(
+            MergeConflict(
+                type='catalog',
+                reason='plural-forms-mismatch',
+                context=None,
+                msgid=None,
+                field='plural_forms',
+                base=plural_forms[0],
+                local=plural_forms[1],
+                incoming=plural_forms[2],
+            ),
+        )
+
+    merged = deepcopy(local)
+    merged._messages = {}
+    merged.obsolete = {}
+    merged._conflicts = defaultdict(list)
+
+    base_entries = _catalog_entries(base)
+    local_entries = _catalog_entries(local)
+    incoming_entries = _catalog_entries(incoming)
+
+    keys = list(local_entries)
+    keys.extend(key for key in incoming_entries if key not in local_entries)
+    keys.extend(
+        key for key in base_entries if key not in local_entries and key not in incoming_entries
+    )
+
+    def entry_with_sibling(catalog_entries, key):
+        """Look up a key, falling back to a structurally different message
+        that shares the same catalog store key (singular id + context),
+        such as a plural version of a singular message.
+        """
+        entry = catalog_entries.get(key)
+        if entry is not None:
+            return entry
+        context, full_id = key
+        singular = full_id[0] if isinstance(full_id, tuple) else full_id
+        wanted_store = merged._key_for(singular, context)
+        for other_key, other_entry in catalog_entries.items():
+            if other_key != key and other_key[0] == context:
+                other_message = other_entry[1]
+                if merged._key_for(other_message.id, context) == wanted_store:
+                    return other_entry
+        return None
+
+    for key in keys:
+        base_entry = entry_with_sibling(base_entries, key)
+        local_entry = entry_with_sibling(local_entries, key)
+        incoming_entry = entry_with_sibling(incoming_entries, key)
+        entry = _merge_entry(
+            key,
+            base_entry,
+            local_entry,
+            incoming_entry,
+            plural_rules_consistent,
+            conflicts,
+        )
+        if entry is None:
+            continue
+        state, message = entry
+        message = message.clone()
+        store_key = merged._key_for(message.id, message.context)
+        target = merged._messages if state == 'active' else merged.obsolete
+        existing = merged._messages.get(store_key) or merged.obsolete.get(store_key)
+        if existing is not None and existing.id != message.id:
+            # Two structurally different messages (e.g. singular vs.
+            # plural) cannot share one catalog key; the already stored
+            # entry (local-first iteration order) wins. The collision is
+            # recorded instead of silently mixing the messages.
+            _record_message_conflict(
+                conflicts, 'msgid-collision', key, None,
+                _entry_to_data(base_entry),
+                _entry_to_data(local_entry),
+                _entry_to_data(incoming_entry),
+            )
+            continue
+        target[store_key] = message
+
+    # The same singular/plural structure collision can be seen from both
+    # merge keys; keep one conflict record per catalog store key.
+    deduped_conflicts: list[MergeConflict] = []
+    reported_collision_stores: set = set()
+    for conflict in conflicts:
+        if conflict['reason'] == 'msgid-collision':
+            msgid = conflict['msgid']
+            singular = msgid[0] if isinstance(msgid, list) else msgid
+            dedupe_key = (conflict['context'], singular)
+            if dedupe_key in reported_collision_stores:
+                continue
+            reported_collision_stores.add(dedupe_key)
+        deduped_conflicts.append(conflict)
+
+    return merged, deduped_conflicts

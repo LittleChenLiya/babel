@@ -1,0 +1,43 @@
+# Local branch ("ours"): local translations win on conflict.
+msgid ""
+msgstr ""
+"Project-Id-Version: merge-demo 1.0\n"
+"PO-Revision-Date: 2024-02-01 00:00+0000\n"
+"Last-Translator: Local <local@example.com>\n"
+"Language-Team: German <de@li.org>\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: ui.py:10
+msgctxt "button"
+msgid "Open"
+msgstr "Öffnen"
+
+#: ui.py:20 ui.py:21
+msgctxt "menu"
+msgid "Open"
+msgstr "Öffnen (Menü, lokal)"
+
+#. Number of files to synchronize.
+#: sync.py:5 sync_local.py:9
+#, fuzzy
+# Local reviewer note
+msgid "{count} file"
+msgid_plural "{count} files"
+msgstr[0] "{count} Datei (lokal)"
+msgstr[1] "{count} Dateien"
+
+#: greet.py:3
+msgid "Hello"
+msgstr "Hallo Welt"
+
+#: bye.py:4
+msgid "Goodbye"
+msgstr "Auf Wiedersehen"
+
+#: ancient.py:2
+msgid "Ancient"
+msgstr "Uralt"

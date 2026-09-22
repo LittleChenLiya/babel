@@ -24,3 +24,11 @@ Exceptions
 ----------
 
 .. autoexception:: TranslationError
+
+Merging catalogs
+----------------
+
+.. autofunction:: merge_catalogs
+
+.. autoclass:: MergeConflict
+   :members:

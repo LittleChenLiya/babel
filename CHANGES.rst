@@ -1,6 +1,14 @@
 Babel Changelog
 ===============
 
+Version 2.19
+------------
+
+Features
+~~~~~~~~
+
+* Messages: Add `babel.messages.catalog.merge_catalogs()` for three-way merging of PO catalog branches, returning a merged catalog and structured, message-level conflict records.
+
 Version 2.18.0
 --------------
 

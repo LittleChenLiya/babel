@@ -1,0 +1,51 @@
+# Incoming branch ("theirs").
+msgid ""
+msgstr ""
+"Project-Id-Version: merge-demo 1.0\n"
+"PO-Revision-Date: 2024-02-02 00:00+0000\n"
+"Last-Translator: Incoming <incoming@example.com>\n"
+"Language-Team: German <de@li.org>\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: ui.py:10
+msgctxt "button"
+msgid "Open"
+msgstr "Öffnen (eingehend)"
+
+#: ui.py:20
+msgctxt "menu"
+msgid "Open"
+msgstr "Öffnen (Menü)"
+
+#. Number of files to synchronize.
+#: sync.py:5 sync_remote.py:12
+#, fuzzy
+# Incoming reviewer note
+msgid "{count} file"
+msgid_plural "{count} files"
+msgstr[0] "{count} Datei"
+msgstr[1] "{count} Dateien (eingehend)"
+
+#: greet.py:3
+msgid "Hello"
+msgstr "Hallo Du"
+
+#: removed.py:1
+msgid "Removed on local"
+msgstr "Nur lokal entfernt"
+
+#: legacy.py:8 legacy_new.py:1
+msgid "Legacy"
+msgstr "Alt (erneuert)"
+
+#: bye.py:4
+msgid "Goodbye"
+msgstr "Auf Wiedersehen"
+
+#~ msgid "Ancient"
+#~ msgstr "Uralt"
+
