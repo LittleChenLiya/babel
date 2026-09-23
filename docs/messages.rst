@@ -424,3 +424,112 @@ more productive.
 .. note:: Whether translator comments can be extracted depends on the extraction
           method in use. The Python extractor provided by Babel does implement
           this feature, but others may not.
+
+
+.. _`locale-fallback-resolution`:
+
+--------------------------
+Locale Fallback Resolution
+--------------------------
+
+Applications that ship several partially translated locales often want an
+explicit, predictable fallback chain: try Canadian French, then French, then
+English, and stop.  The :mod:`babel.messages.fallback` module provides this
+with a directed fallback table that is validated up front (unknown locale
+references and cycles are reported before any message is looked up) and
+searched depth-first in declaration order, visiting every locale at most
+once.
+
+A message is identified by its context and its complete id (including the
+plural id).  Messages that are fuzzy, obsolete, untranslated, fail the
+placeholder checks, or lack a plural slot required by their own catalog are
+not used; plural forms from different locales are never combined, and the
+plural form is selected with the *source* locale's plural rules.  Every
+lookup returns a :class:`~babel.messages.fallback.Resolution` that names
+the source locale, lists the visited fallback path, and explains why each
+preceding locale was skipped.  If no locale can provide the message, the
+result is an explicit miss with diagnostics - the untranslated (English)
+msgid is never silently returned as the translation.
+
+The resolver works on an immutable
+:class:`~babel.messages.fallback.CatalogSnapshot` taken when the resolver
+is constructed, and caches compiled plural rules only for its own lifetime.
+After updating any catalog, build a new snapshot and a new resolver::
+
+    snapshot = CatalogSnapshot(catalogs)          # freeze current catalogs
+    resolver = FallbackResolver(snapshot, fallbacks)
+    # ... catalogs are updated ...
+    resolver = FallbackResolver(CatalogSnapshot(catalogs), fallbacks)
+
+The following script prints the selected source locale and the skip reasons
+for a normal fallback, and then shows how an invalid (cyclic) fallback table
+is rejected.  It runs in a fraction of a second:
+
+.. code-block:: python
+
+    from babel.messages import Catalog, Message
+    from babel.messages.fallback import FallbackGraphError, FallbackResolver
+
+    PLURALS = "nplurals=2; plural=(n != 1);"
+    FILE_ID = ("%(count)s file", "%(count)s files")
+
+
+    def make_catalog():
+        catalog = Catalog()
+        catalog.mime_headers = [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Plural-Forms", PLURALS),
+        ]
+        return catalog
+
+
+    # fr_CA has an incomplete plural translation (one of two slots), so the
+    # whole message is taken from fr instead of splicing the two catalogs.
+    fr_ca = make_catalog()
+    fr_ca[FILE_ID] = Message(FILE_ID, ("%(count)s fichier",), context="menu")
+    fr = make_catalog()
+    fr[FILE_ID] = Message(
+        FILE_ID, ("%(count)s fichier", "%(count)s fichiers"), context="menu",
+    )
+    en = make_catalog()
+    en[FILE_ID] = Message(
+        FILE_ID, ("%(count)s file", "%(count)s files"), context="menu",
+    )
+
+    resolver = FallbackResolver(
+        {"fr_CA": fr_ca, "fr": fr, "en": en},
+        {"fr_CA": ["fr"], "fr": ["en"]},
+    )
+
+    print("=== normal fallback: fr_CA -> fr -> en ===")
+    for n in (1, 2):
+        result = resolver.resolve("fr_CA", FILE_ID, context="menu", n=n)
+        print(result.explain())
+        print()
+
+    print("=== invalid fallback table: a <-> b cycle ===")
+    try:
+        FallbackResolver(
+            {"a": make_catalog(), "b": make_catalog()},
+            {"a": ["b"], "b": ["a"]},
+        )
+    except FallbackGraphError as error:
+        print(f"The fallback table was rejected before any lookup: {error}")
+
+Example output::
+
+    === normal fallback: fr_CA -> fr -> en ===
+    Resolved message id=('%(count)s file', '%(count)s files') context='menu' n=1 from locale 'fr'.
+    Plural form index 0 was selected using the plural rules of the source locale 'fr'.
+    Selected text: '%(count)s fichier'
+    Fallback path visited (each locale at most once): fr_CA -> fr
+    Skipped locale 'fr_CA': incomplete plural slots: the catalog requires 2 forms but the message provides 1.
+
+    Resolved message id=('%(count)s file', '%(count)s files') context='menu' n=2 from locale 'fr'.
+    Plural form index 1 was selected using the plural rules of the source locale 'fr'.
+    Selected text: '%(count)s fichiers'
+    Fallback path visited (each locale at most once): fr_CA -> fr
+    Skipped locale 'fr_CA': incomplete plural slots: the catalog requires 2 forms but the message provides 1.
+
+    === invalid fallback table: a <-> b cycle ===
+    The fallback table was rejected before any lookup: fallback cycle detected: a -> b -> a
