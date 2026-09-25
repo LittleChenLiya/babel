@@ -41,6 +41,7 @@ from babel.messages.extract import (
 )
 from babel.messages.mofile import write_mo
 from babel.messages.pofile import read_po, write_po
+from babel.messages.pseudo import DEFAULT_EXPANSION, DEFAULT_SEED, PseudoLocalizer
 from babel.util import LOCALTZ
 
 log = logging.getLogger('babel')
@@ -1130,6 +1131,81 @@ class MergeCatalog(CommandMixin):
             )
 
 
+
+
+class PseudoLocalizeCatalog(CommandMixin):
+    description = 'generate a pseudo-localized catalog from a PO or POT file'
+    user_options = [
+        ('input-file=', 'i',
+         'name of the input PO or POT file'),
+        ('output-file=', 'o',
+         'name of the output PO file (defaults to standard output)'),
+        ('expansion=', None,
+         'ratio by which plain text is expanded (default 0.3)'),
+        ('seed=', None,
+         'integer seed selecting the filler characters (default: a fixed '
+         'built-in value, so output is reproducible)'),
+        ('html', None,
+         'treat all messages as HTML, transforming only text nodes'),
+        ('locale=', 'l',
+         'locale of the generated catalog'),
+        ('no-wrap', None,
+         'do not break long message lines, longer than the output line width, '
+         'and do not fill the lines to make them fit into the width'),
+        ('width=', 'w',
+         'set output line width (default 76)'),
+    ]
+    boolean_options = ['html', 'no-wrap']
+
+    def initialize_options(self):
+        self.input_file = None
+        self.output_file = None
+        self.expansion = DEFAULT_EXPANSION
+        self.seed = DEFAULT_SEED
+        self.html = False
+        self.no_wrap = False
+        self.locale = None
+        self.width = None
+
+    def finalize_options(self):
+        if not self.input_file:
+            raise OptionError('you must specify the input file')
+        try:
+            self.expansion = float(self.expansion)
+        except (TypeError, ValueError):
+            raise OptionError(f'invalid expansion ratio: {self.expansion!r}') from None
+        try:
+            self.seed = int(self.seed)
+        except (TypeError, ValueError):
+            raise OptionError(f'invalid seed: {self.seed!r}') from None
+        self._finalize_width()
+
+    def run(self):
+        with open(self.input_file, 'rb') as infile:
+            catalog = read_po(infile, locale=self.locale)
+
+        localizer = PseudoLocalizer(expansion=self.expansion, seed=self.seed)
+        errors = localizer.localize_catalog(catalog, html=True if self.html else None)
+        for message, error in errors:
+            self.log.error('error: %s: message %r: %s', self.input_file, message.id, error)
+
+        self.log.info(
+            'pseudo-localized %d of %d messages from %s (%d errors)',
+            len(catalog) - len(errors), len(catalog), self.input_file, len(errors),
+        )
+
+        if self.output_file:
+            outfile = open(self.output_file, 'wb')
+        else:
+            outfile = sys.stdout.buffer
+        try:
+            write_po(outfile, catalog, width=self.width)
+        finally:
+            if self.output_file:
+                outfile.close()
+        return 0
+
+
 class CommandLineInterface:
     """Command-line interface.
 
@@ -1146,6 +1222,7 @@ class CommandLineInterface:
         'update': 'update existing message catalogs from a POT file',
         'concat': 'concatenates and merges the specified PO files',
         'merge': 'combines two PO files into one',
+        'pseudo': 'generate a pseudo-localized catalog from a PO or POT file',
     }
 
     command_classes = {
@@ -1155,6 +1232,7 @@ class CommandLineInterface:
         'update': UpdateCatalog,
         'concat': ConcatenateCatalog,
         'merge': MergeCatalog,
+        'pseudo': PseudoLocalizeCatalog,
     }
 
     log = None  # Replaced on instance level

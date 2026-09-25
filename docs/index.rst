@@ -20,11 +20,12 @@ some information about how it can be used.
    installation
    locale
    dates
-   numbers
-   messages
-   cmdline
-   setup
-   support
+  numbers
+  messages
+  cmdline
+   pseudo
+  setup
+  support
 
 API Reference
 -------------

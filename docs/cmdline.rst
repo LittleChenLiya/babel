@@ -328,6 +328,45 @@ The compendium can be used in two modes:
 The ``backup`` option is used to create a backup copy of the def.po file before updating it.
 The ``suffix`` option allows you to specify a custom suffix for the backup file (defaulting to ``~``).
 
+pseudo
+=====
+
+The ``pseudo`` command generates a pseudo-localized catalog from a PO or
+POT file, so that user interfaces can be checked for length problems and
+interpolation errors without real translations::
+
+    $ pybabel pseudo --help
+    Usage: pybabel pseudo [options] 
+
+    generate a pseudo-localized catalog from a PO or POT file
+
+    Options:
+      -i INPUT_FILE, --input-file=INPUT_FILE
+                            name of the input PO or POT file
+      -o OUTPUT_FILE, --output-file=OUTPUT_FILE
+                            name of the output PO file (defaults to standard
+                            output)
+      --expansion=EXPANSION
+                            ratio by which plain text is expanded (default 0.3)
+      --seed=SEED           integer seed selecting the filler characters
+                            (default: a fixed built-in value, so output is
+                            reproducible)
+      --html                treat all messages as HTML, transforming only text
+                            nodes
+      -l LOCALE, --locale=LOCALE
+                            locale of the generated catalog
+      --no-wrap             do not break long message lines, longer than the
+                            output line width, and do not fill the lines to
+                            make them fit into the width
+      -w WIDTH, --width=WIDTH
+                            set output line width (default 76)
+
+See :doc:`pseudo` for the exact transformation rules.  Untranslated
+messages are pseudo-localized from their ``msgid``; messages that already
+carry the boundary markers are left unchanged, so the command is
+idempotent.  Messages that fail to transform are reported individually
+and keep their original text.
+
 concat and merge usage scenarios
 =================================
 

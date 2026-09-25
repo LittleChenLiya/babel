@@ -1,6 +1,19 @@
 Babel Changelog
 ===============
 
+Unreleased
+----------
+
+Features
+~~~~~~~~
+
+* Messages: Add pseudo-localization support: the new
+  ``babel.messages.pseudo`` module and the ``pybabel pseudo`` command
+  transform catalogs into deterministic pseudo-translations (accent
+  mapping, configurable expansion with a fixed seed, boundary markers),
+  preserving placeholders, escapes and HTML markup, so interfaces can be
+  checked for length and interpolation problems without real translations
+
 Version 2.18.0
 --------------
 

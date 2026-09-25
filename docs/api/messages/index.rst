@@ -7,7 +7,8 @@ the API documentation shows those parts.
 .. toctree::
    :maxdepth: 2
 
-   catalog
-   extract
-   mofile
-   pofile
+  catalog
+  extract
+  mofile
+  pofile
+   pseudo
