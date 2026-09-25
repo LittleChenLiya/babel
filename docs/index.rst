@@ -22,6 +22,7 @@ some information about how it can be used.
    dates
    numbers
    messages
+   pseudo
    cmdline
    setup
    support

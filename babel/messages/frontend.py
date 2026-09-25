@@ -41,6 +41,12 @@ from babel.messages.extract import (
 )
 from babel.messages.mofile import write_mo
 from babel.messages.pofile import read_po, write_po
+from babel.messages.pseudo import (
+    DEFAULT_EXPANSION,
+    DEFAULT_SEED,
+    interpolate_sample,
+    pseudo_localize_catalog,
+)
 from babel.util import LOCALTZ
 
 log = logging.getLogger('babel')
@@ -1130,6 +1136,127 @@ class MergeCatalog(CommandMixin):
             )
 
 
+class PseudoCatalog(CommandMixin):
+    description = 'generate a pseudo-localized catalog from a PO/POT file'
+    user_options = [
+        ('input-file=', 'i', 'name of the input PO/POT file'),
+        ('output-file=', 'o', 'write output to specified file, the results are written '
+                              'to standard output if no output file is specified or if it is \'-\''),
+        ('expansion=', 'e', 'text expansion ratio, e.g. 0.3 for 30% (default 0.3)'),
+        ('seed=', 's', 'seed for the deterministic expansion padding (default 0)'),
+        ('html=', 'H', "HTML handling: 'auto' (default), 'always' or 'never'"),
+        ('compare', 'c', 'print a comparison of source text, pseudo-localized text '
+                         'and interpolated sample output to standard output'),
+        ('no-location', None, 'do not include location comments with filename and line number'),
+        ('width=', 'w', 'set output line width (default 76)'),
+        ('no-wrap', None, 'do not break long message lines, longer than '
+                          'the output line width, into several lines'),
+        ('sort-output', None, 'generate sorted output'),
+        ('sort-by-file', 'F', 'sort output by file location'),
+    ]
+
+    boolean_options = [
+        'compare',
+        'no-location',
+        'no-wrap',
+        'sort-output',
+        'sort-by-file',
+    ]
+
+    option_choices = {
+        'html': ('auto', 'always', 'never'),
+    }
+
+    def initialize_options(self):
+        self.input_file = None
+        self.output_file = None
+        self.expansion = DEFAULT_EXPANSION
+        self.seed = DEFAULT_SEED
+        self.html = 'auto'
+        self.compare = False
+        self.no_location = None
+        self.width = None
+        self.no_wrap = False
+        self.sort_output = False
+        self.sort_by_file = False
+
+    def finalize_options(self):
+        if not self.input_file:
+            raise OptionError('you must specify the input file')
+
+        self._finalize_width()
+        self.expansion = float(self.expansion)
+        self.seed = int(self.seed)
+
+    def run(self):
+        with open(self.input_file) as pofile:
+            catalog = read_po(pofile)
+
+        html_mode = {'always': True, 'never': False}.get(self.html)
+        errors = pseudo_localize_catalog(
+            catalog,
+            expansion=self.expansion,
+            seed=self.seed,
+            html=html_mode,
+        )
+        for msgid, error in errors:
+            self.log.error('Failed to pseudo-localize message %r: %s', msgid, error)
+
+        if self.compare:
+            self._print_comparison(catalog, errors)
+            return
+
+        output_file = self.output_file
+        if not output_file or output_file == '-':
+            write_po(
+                sys.stdout.buffer,
+                catalog,
+                width=self.width,
+                sort_by_file=self.sort_by_file,
+                sort_output=self.sort_output,
+                no_location=self.no_location,
+            )
+        else:
+            with open(output_file, 'wb') as outfile:
+                write_po(
+                    outfile,
+                    catalog,
+                    width=self.width,
+                    sort_by_file=self.sort_by_file,
+                    sort_output=self.sort_output,
+                    no_location=self.no_location,
+                )
+
+    def _print_comparison(self, catalog, errors):
+        failed_ids = {msgid for msgid, _ in errors}
+        out = sys.stdout.buffer
+        for message in catalog:
+            if not message.id:
+                continue
+            sources = message.id if isinstance(message.id, tuple) else (message.id,)
+            pseudos = (
+                message.string
+                if isinstance(message.string, (list, tuple))
+                else (message.string,)
+            )
+            out.write(f'msgid: {sources[0]!r}\n'.encode('utf-8'))
+            for index, source in enumerate(sources[1:], start=1):
+                out.write(f'msgid[{index}]: {source!r}\n'.encode('utf-8'))
+            if message.id in failed_ids:
+                out.write(b'pseudo: <error, message left unchanged>\n')
+                continue
+            for index, pseudo in enumerate(pseudos):
+                label = f'pseudo[{index}]:' if len(pseudos) > 1 else 'pseudo:'
+                out.write(f'{label} {pseudo!r}\n'.encode('utf-8'))
+                try:
+                    sample = interpolate_sample(pseudo)
+                except Exception as exc:
+                    sample = f'<interpolation failed: {exc}>'
+                sample_label = f'sample[{index}]:' if len(pseudos) > 1 else 'sample:'
+                out.write(f'{sample_label} {sample!r}\n'.encode('utf-8'))
+            out.write(b'\n')
+
+
 class CommandLineInterface:
     """Command-line interface.
 
@@ -1146,6 +1273,7 @@ class CommandLineInterface:
         'update': 'update existing message catalogs from a POT file',
         'concat': 'concatenates and merges the specified PO files',
         'merge': 'combines two PO files into one',
+        'pseudo': 'generate a pseudo-localized catalog from a PO/POT file',
     }
 
     command_classes = {
@@ -1155,6 +1283,7 @@ class CommandLineInterface:
         'update': UpdateCatalog,
         'concat': ConcatenateCatalog,
         'merge': MergeCatalog,
+        'pseudo': PseudoCatalog,
     }
 
     log = None  # Replaced on instance level

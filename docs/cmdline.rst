@@ -328,6 +328,50 @@ The compendium can be used in two modes:
 The ``backup`` option is used to create a backup copy of the def.po file before updating it.
 The ``suffix`` option allows you to specify a custom suffix for the backup file (defaulting to ``~``).
 
+pseudo
+======
+
+The `pseudo` command generates a pseudo-localized catalog from a PO or POT
+file, for checking user interfaces for length/expansion and interpolation
+problems before real translations are available::
+
+    $ pybabel pseudo --help
+    Usage: pybabel pseudo [options]
+
+    generate a pseudo-localized catalog from a PO/POT file
+
+    Options:
+      -h, --help            show this help message and exit
+      -i INPUT_FILE, --input-file=INPUT_FILE
+                            name of the input PO/POT file
+      -o OUTPUT_FILE, --output-file=OUTPUT_FILE
+                            write output to specified file, the results are written
+                            to standard output if no output file is specified or if it is '-'
+      -e EXPANSION, --expansion=EXPANSION
+                            text expansion ratio, e.g. 0.3 for 30% (default 0.3)
+      -s SEED, --seed=SEED  seed for the deterministic expansion padding (default 0)
+      -H HTML, --html=HTML  HTML handling: 'auto' (default), 'always' or 'never'
+      -c, --compare         print a comparison of source text, pseudo-localized text
+                            and interpolated sample output to standard output
+      --no-location         do not include location comments with filename and line number
+      -w WIDTH, --width=WIDTH
+                            set output line width (default 76)
+      --no-wrap             do not break long message lines, longer than
+                            the output line width, into several lines
+      --sort-output         generate sorted output
+      -F, --sort-by-file    sort output by file location
+
+With `--compare`, the command prints each source message next to its
+pseudo-localized form and a sample interpolation, e.g.::
+
+    $ pybabel pseudo -i messages.pot --compare
+    msgid: 'Hello {name}'
+    pseudo: '⟦Ĥèļļö  àê{name}⟧'
+    sample: '⟦Ĥèļļö  àêLi⟧'
+
+See :doc:`pseudo` for the full transformation rules.
+
+
 concat and merge usage scenarios
 =================================
 
