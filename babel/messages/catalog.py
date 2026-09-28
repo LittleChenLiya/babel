@@ -13,13 +13,13 @@ from __future__ import annotations
 import datetime
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from copy import copy
 from difflib import SequenceMatcher
 from email import message_from_string
 from heapq import nlargest
 from string import Formatter
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from babel import __version__ as VERSION
 from babel.core import Locale, UnknownLocaleError
@@ -30,6 +30,7 @@ from babel.util import LOCALTZ, _cmp
 if TYPE_CHECKING:
     from typing_extensions import TypeAlias
 
+    _MessageString: TypeAlias = str | tuple[str, ...] | list[str]
     _MessageID: TypeAlias = str | tuple[str, ...] | list[str]
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     'Catalog',
     'Message',
     'TranslationError',
+    'TranslationUpdate',
 ]
 
 
@@ -354,11 +356,37 @@ def _force_text(s: str | bytes, encoding: str = 'utf-8', errors: str = 'strict')
     return str(s)
 
 
+def _get_first_present(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
 class ConflictInfo(TypedDict):
     message: Message
     filename: str
     project: str
     version: str
+
+
+class TranslationUpdate(TypedDict, total=False):
+    id: _MessageID
+    msgid: _MessageID
+    context: str | None
+    msgctxt: str | None
+    old_string: _MessageString | None
+    old_translation: _MessageString | None
+    current_string: _MessageString | None
+    current_translation: _MessageString | None
+    expected_string: _MessageString | None
+    expected_translation: _MessageString | None
+    new_string: _MessageString | None
+    new_translation: _MessageString | None
+    string: _MessageString | None
+    translation: _MessageString | None
+    clear_fuzzy: bool
+    fuzzy: bool
 
 
 class Catalog:
@@ -898,6 +926,140 @@ class Catalog:
         key = self._key_for(id, context)
         if key in self._messages:
             del self._messages[key]
+
+    def update_translations(
+        self,
+        updates: Iterable[TranslationUpdate | Mapping[str, Any]],
+    ) -> Catalog:
+        """Atomically update translations after checking their current values.
+
+        Every update must identify an existing message by its complete message
+        ID (including both singular and plural IDs) and context, and must
+        provide the translation expected to be current. The new translations
+        are applied only when every item in the batch matches. A successful
+        translation update also clears that message's ``fuzzy`` flag.
+
+        >>> catalog = Catalog()
+        >>> catalog.add('foo', 'old')
+        <Message ...>
+        >>> catalog.update_translations([
+        ...     {'id': 'foo', 'old_string': 'old', 'new_string': 'new'},
+        ... ]) is catalog
+        True
+        >>> catalog['foo'].string
+        'new'
+
+        :param updates: the translation updates to apply
+        """
+        updated_messages = self._messages.copy()
+        seen_keys: set[str | tuple[str, str]] = set()
+
+        for index, update in enumerate(updates):
+            message_id = _get_first_present(update, ('id', 'msgid'))
+            if message_id is None:
+                raise ValueError(f'update {index} is missing a message ID')
+            message_id = self._normalize_message_id(message_id, index, 'message ID')
+            context = _get_first_present(update, ('context', 'msgctxt'))
+            if context == '':
+                context = None
+            key = self._key_for(message_id, context)
+            if key in seen_keys:
+                raise ValueError(f'update {index} updates the same message twice')
+            seen_keys.add(key)
+
+            current_message = self._messages.get(key)
+            if current_message is None:
+                raise KeyError(f'update {index} references a message that does not exist')
+            if current_message.id != message_id:
+                raise ValueError(
+                    f'update {index} does not match the complete message ID',
+                )
+            message = current_message.clone()
+
+            old_string = _get_first_present(update, (
+                'old_string',
+                'old_translation',
+                'current_string',
+                'current_translation',
+                'expected_string',
+                'expected_translation',
+            ))
+            if old_string is None:
+                raise ValueError(f'update {index} is missing the expected old translation')
+            old_string = self._normalize_translation(
+                old_string,
+                message,
+                self.num_plurals,
+                index,
+                'old',
+            )
+            new_string = _get_first_present(update, (
+                'new_string',
+                'new_translation',
+                'string',
+                'translation',
+            ))
+            if new_string is None:
+                raise ValueError(f'update {index} is missing the new translation')
+            new_string = self._normalize_translation(
+                new_string,
+                message,
+                self.num_plurals,
+                index,
+                'new',
+            )
+
+            if message.string != old_string:
+                raise ValueError(f'update {index} has a stale translation baseline')
+
+            message.string = new_string
+            clear_fuzzy = update.get('clear_fuzzy', not update.get('fuzzy', False))
+            if clear_fuzzy:
+                message.flags.discard('fuzzy')
+            updated_messages[key] = message
+
+        self._messages = updated_messages
+        return self
+
+    @staticmethod
+    def _normalize_message_id(
+        message_id: object,
+        index: int,
+        description: str,
+    ) -> str | tuple[str, ...]:
+        if isinstance(message_id, str):
+            return message_id
+        if isinstance(message_id, (list, tuple)):
+            if len(message_id) != 2 or not all(isinstance(part, str) for part in message_id):
+                raise ValueError(f'update {index} has an invalid {description}')
+            return tuple(message_id)
+        raise ValueError(f'update {index} has an invalid {description}')
+
+    @classmethod
+    def _normalize_translation(
+        cls,
+        translation: object,
+        message: Message,
+        num_plurals: int,
+        index: int,
+        description: str,
+    ) -> str | tuple[str, ...]:
+        if message.pluralizable:
+            if not isinstance(translation, (list, tuple)):
+                raise ValueError(
+                    f'update {index} has a non-plural {description} translation',
+                )
+            if len(translation) != num_plurals:
+                raise ValueError(
+                    f'update {index} has the wrong number of {description} plural '
+                    'translations',
+                )
+            if not all(isinstance(part, str) for part in translation):
+                raise ValueError(f'update {index} has an invalid {description} translation')
+            return tuple(translation)
+        if not isinstance(translation, str):
+            raise ValueError(f'update {index} has a non-string {description} translation')
+        return translation
 
     def update(
         self,

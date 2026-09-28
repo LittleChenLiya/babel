@@ -15,6 +15,8 @@ import datetime
 import pickle
 from io import StringIO
 
+import pytest
+
 from babel.dates import UTC, format_datetime
 from babel.messages import catalog, pofile
 from babel.util import FixedOffsetTimezone
@@ -508,6 +510,195 @@ def test_catalog_add():
     foo = cat.add('foo')
     assert foo.id == 'foo'
     assert cat['foo'] is foo
+
+
+def _catalog_snapshot(cat):
+    return [
+        (key, copy.deepcopy(message.__dict__))
+        for key, message in cat._messages.items()
+    ]
+
+
+def test_catalog_update_translations_batch():
+    cat = catalog.Catalog()
+    cat.add('one', 'uno', flags=['fuzzy', 'reviewed'])
+    cat.add(('apple', 'apples'), ('manzana', 'manzanas'), context='fruit')
+
+    result = cat.update_translations(
+        [
+            {'id': 'one', 'old_string': 'uno', 'new_string': 'una'},
+            {
+                'id': ('apple', 'apples'),
+                'context': 'fruit',
+                'old_string': ('manzana', 'manzanas'),
+                'new_string': ('manzana nueva', 'manzanas nuevas'),
+            },
+        ],
+    )
+
+    assert result is cat
+    assert cat['one'].string == 'una'
+    assert not cat['one'].fuzzy
+    assert 'reviewed' in cat['one'].flags
+    assert cat.get(('apple', 'apples'), 'fruit').string == (
+        'manzana nueva',
+        'manzanas nuevas',
+    )
+
+
+def test_catalog_update_translations_stale_baseline_is_atomic():
+    cat = catalog.Catalog()
+    cat.add('one', 'uno')
+    cat.add('two', 'dos')
+
+    cat.update_translations(
+        [
+            {'id': 'one', 'old_string': 'uno', 'new_string': 'una'},
+            {'id': 'two', 'old_string': 'dos', 'new_string': 'dos actualizados'},
+        ],
+    )
+
+    cat['one'].string = 'cambio de otra persona'
+    before = _catalog_snapshot(cat)
+
+    with pytest.raises(ValueError, match='stale'):
+        cat.update_translations(
+            [
+                {'id': 'one', 'old_string': 'una', 'new_string': 'otra versión'},
+                {
+                    'id': 'two',
+                    'old_string': 'dos actualizados',
+                    'new_string': 'dos nuevas',
+                },
+            ],
+        )
+
+    assert _catalog_snapshot(cat) == before
+    assert cat['one'].string == 'cambio de otra persona'
+    assert cat['two'].string == 'dos actualizados'
+
+
+def test_catalog_update_translations_distinguishes_contexts():
+    cat = catalog.Catalog()
+    cat.add('same', 'menu open', context='menu')
+    cat.add('same', 'file open', context='file')
+
+    cat.update_translations(
+        [
+            {
+                'id': 'same',
+                'context': 'menu',
+                'old_string': 'menu open',
+                'new_string': 'open menu',
+            },
+        ],
+    )
+
+    assert cat.get('same', 'menu').string == 'open menu'
+    assert cat.get('same', 'file').string == 'file open'
+
+    before = _catalog_snapshot(cat)
+    with pytest.raises(KeyError):
+        cat.update_translations(
+            [
+                {
+                    'id': 'same',
+                    'context': 'missing',
+                    'old_string': '',
+                    'new_string': 'new',
+                },
+            ],
+        )
+    assert _catalog_snapshot(cat) == before
+
+
+def test_catalog_update_translations_requires_complete_plural_id():
+    cat = catalog.Catalog()
+    cat.add(('apple', 'apples'), ('manzana', 'manzanas'))
+    before = _catalog_snapshot(cat)
+
+    with pytest.raises(ValueError, match='complete message ID'):
+        cat.update_translations(
+            [
+                {
+                    'id': ('apple', 'other plural id'),
+                    'old_string': ('manzana', 'manzanas'),
+                    'new_string': ('manzana', 'manzanas'),
+                },
+            ],
+        )
+
+    assert _catalog_snapshot(cat) == before
+
+
+def test_catalog_update_translations_rejects_wrong_plural_count():
+    cat = catalog.Catalog()
+    cat.add('one', 'uno')
+    cat.add(('apple', 'apples'), ('manzana', 'manzanas'))
+    before = _catalog_snapshot(cat)
+
+    with pytest.raises(ValueError, match='plural translations'):
+        cat.update_translations(
+            [
+                {
+                    'id': ('apple', 'apples'),
+                    'old_string': ('manzana',),
+                    'new_string': ('manzana nueva',),
+                },
+                {'id': 'one', 'old_string': 'uno', 'new_string': 'una'},
+            ],
+        )
+
+    assert _catalog_snapshot(cat) == before
+
+
+def test_catalog_update_translations_rejects_duplicate_updates():
+    cat = catalog.Catalog()
+    cat.add('one', 'uno')
+    cat.add('two', 'dos')
+    before = _catalog_snapshot(cat)
+    update = {'id': 'one', 'old_string': 'uno', 'new_string': 'una'}
+
+    with pytest.raises(ValueError, match='same message twice'):
+        cat.update_translations([update, update])
+
+    assert _catalog_snapshot(cat) == before
+
+
+def test_catalog_update_translations_rejects_missing_message():
+    cat = catalog.Catalog()
+    cat.add('one', 'uno')
+    before = _catalog_snapshot(cat)
+
+    with pytest.raises(KeyError):
+        cat.update_translations(
+            [
+                {'id': 'missing', 'old_string': '', 'new_string': 'nueva'},
+                {'id': 'one', 'old_string': 'uno', 'new_string': 'una'},
+            ],
+        )
+
+    assert _catalog_snapshot(cat) == before
+
+
+def test_catalog_update_translations_can_clear_only_fuzzy():
+    cat = catalog.Catalog()
+    cat.add('one', 'uno', flags=['fuzzy', 'reviewed'])
+
+    cat.update_translations(
+        [
+            {
+                'id': 'one',
+                'old_string': 'uno',
+                'new_string': 'uno',
+                'clear_fuzzy': True,
+            },
+        ],
+    )
+
+    assert cat['one'].string == 'uno'
+    assert not cat['one'].fuzzy
+    assert 'reviewed' in cat['one'].flags
 
 
 def test_catalog_update():
