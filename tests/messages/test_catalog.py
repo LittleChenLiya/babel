@@ -601,3 +601,197 @@ msgid ""
 msgstr ""
 "POT-Creation-Date: 2007-04-01 15:30+0200\n"
     """))))
+
+
+def _snapshot_catalog(catalog_obj):
+    """Return a deep snapshot of the translation-relevant catalog state."""
+    return [
+        (
+            message.id,
+            message.context,
+            copy.deepcopy(message.string),
+            copy.deepcopy(message.flags),
+        )
+        for message in catalog_obj
+    ]
+
+
+def _make_update_catalog():
+    catalog_obj = catalog.Catalog(locale='en')
+    catalog_obj.add('hello', 'hallo')
+    catalog_obj.add('bye', 'tchuess')
+    catalog_obj.add(('apple', 'apples'), ('apfel', 'aepfel'))
+    catalog_obj.add('read', 'lesen', flags=['fuzzy'])
+    catalog_obj.add('bank', 'bank_finance', context='finance')
+    catalog_obj.add('bank', 'bank_river', context='river')
+    return catalog_obj
+
+
+def test_update_translations_batch_success():
+    catalog_obj = _make_update_catalog()
+    result = catalog_obj.update_translations([
+        catalog.TranslationUpdate('hello', 'hallo', 'hi'),
+        catalog.TranslationUpdate('bye', 'tchuess', 'ciao'),
+    ])
+    assert result is catalog_obj
+    assert catalog_obj['hello'].string == 'hi'
+    assert catalog_obj['bye'].string == 'ciao'
+
+
+def test_update_translations_stale_baseline_is_atomic():
+    catalog_obj = _make_update_catalog()
+    catalog_obj.update_translations([
+        catalog.TranslationUpdate('hello', 'hallo', 'hi'),
+        catalog.TranslationUpdate('bye', 'tchuess', 'ciao'),
+    ])
+    snapshot = _snapshot_catalog(catalog_obj)
+
+    try:
+        catalog_obj.update_translations([
+            catalog.TranslationUpdate('hello', 'hallo', 'overwritten'),
+            catalog.TranslationUpdate('bye', 'ciao', 'goodbye'),
+        ])
+    except catalog.StaleTranslationError as error:
+        assert error.update.id == 'hello'
+    else:
+        raise AssertionError('StaleTranslationError was not raised')
+
+    # Nothing in the batch was applied, not even the still-valid item.
+    assert catalog_obj['hello'].string == 'hi'
+    assert catalog_obj['bye'].string == 'ciao'
+    assert _snapshot_catalog(catalog_obj) == snapshot
+
+
+def test_update_translations_distinguishes_context():
+    catalog_obj = _make_update_catalog()
+    catalog_obj.update_translations([
+        catalog.TranslationUpdate(
+            'bank', 'bank_finance', 'geld', context='finance',
+        ),
+        catalog.TranslationUpdate(
+            'bank', 'bank_river', 'fluss', context='river',
+        ),
+    ])
+    assert catalog_obj.get('bank', 'finance').string == 'geld'
+    assert catalog_obj.get('bank', 'river').string == 'fluss'
+
+    snapshot = _snapshot_catalog(catalog_obj)
+    # A baseline from one context cannot match the same msgid in another.
+    try:
+        catalog_obj.update_translations([
+            catalog.TranslationUpdate(
+                'bank', 'bank_finance', 'x', context='river',
+            ),
+        ])
+    except catalog.StaleTranslationError:
+        pass
+    else:
+        raise AssertionError('StaleTranslationError was not raised')
+    assert _snapshot_catalog(catalog_obj) == snapshot
+
+    # An unknown context makes the message identity not found at all.
+    try:
+        catalog_obj.update_translations([
+            catalog.TranslationUpdate('bank', 'x', 'y', context='missing'),
+        ])
+    except catalog.MessageNotFoundError:
+        pass
+    else:
+        raise AssertionError('MessageNotFoundError was not raised')
+    assert _snapshot_catalog(catalog_obj) == snapshot
+
+
+def test_update_translations_wrong_plural_slots_is_atomic():
+    catalog_obj = _make_update_catalog()
+    snapshot = _snapshot_catalog(catalog_obj)
+    update = catalog.TranslationUpdate(
+        ('apple', 'apples'), ('apfel',), ('Apfel',),
+    )
+    try:
+        catalog_obj.update_translations([
+            update,
+            catalog.TranslationUpdate('hello', 'hallo', 'hi'),
+        ])
+    except catalog.PluralFormsMismatchError:
+        pass
+    else:
+        raise AssertionError('PluralFormsMismatchError was not raised')
+    assert catalog_obj['apple'].string == ('apfel', 'aepfel')
+    assert catalog_obj['hello'].string == 'hallo'
+    assert _snapshot_catalog(catalog_obj) == snapshot
+
+    # The correct number of slots works.
+    catalog_obj.update_translations([
+        catalog.TranslationUpdate(
+            ('apple', 'apples'),
+            ('apfel', 'aepfel'),
+            ('Apfel', 'Äpfel'),
+        ),
+    ])
+    assert catalog_obj['apple'].string == ('Apfel', 'Äpfel')
+
+
+def test_update_translations_duplicate_identity_is_atomic():
+    catalog_obj = _make_update_catalog()
+    snapshot = _snapshot_catalog(catalog_obj)
+    try:
+        catalog_obj.update_translations([
+            catalog.TranslationUpdate('hello', 'hallo', 'a'),
+            catalog.TranslationUpdate('hello', 'hallo', 'b'),
+        ])
+    except catalog.DuplicateTranslationUpdateError:
+        pass
+    else:
+        raise AssertionError('DuplicateTranslationUpdateError was not raised')
+    assert catalog_obj['hello'].string == 'hallo'
+    assert _snapshot_catalog(catalog_obj) == snapshot
+
+
+def test_update_translations_unknown_message_is_atomic():
+    catalog_obj = _make_update_catalog()
+    snapshot = _snapshot_catalog(catalog_obj)
+    try:
+        catalog_obj.update_translations([
+            catalog.TranslationUpdate('missing', '', 'x'),
+            catalog.TranslationUpdate('hello', 'hallo', 'hi'),
+        ])
+    except catalog.MessageNotFoundError:
+        pass
+    else:
+        raise AssertionError('MessageNotFoundError was not raised')
+    assert catalog_obj['hello'].string == 'hallo'
+    assert _snapshot_catalog(catalog_obj) == snapshot
+
+
+def test_update_translations_clears_fuzzy_only():
+    catalog_obj = _make_update_catalog()
+    message = catalog_obj['read']
+    assert message.fuzzy
+    assert message.string == 'lesen'
+
+    catalog_obj.update_translations([
+        catalog.TranslationUpdate('read', 'lesen', 'lesen'),
+    ])
+    assert message.string == 'lesen'
+    assert not message.fuzzy
+
+
+def test_update_translations_accepts_mappings_and_keeps_fuzzy():
+    catalog_obj = _make_update_catalog()
+    catalog_obj.update_translations([
+        {'id': 'hello', 'old_string': 'hallo', 'string': 'hi'},
+    ])
+    assert catalog_obj['hello'].string == 'hi'
+
+    catalog_obj.update_translations([('hello', 'hi', 'ho')])
+    assert catalog_obj['hello'].string == 'ho'
+
+    catalog_obj.update_translations([('hello', 'ho', 'huhu', None)])
+    assert catalog_obj['hello'].string == 'huhu'
+
+    message = catalog_obj['read']
+    catalog_obj.update_translations(
+        [catalog.TranslationUpdate('read', 'lesen', 'lesen')],
+        clear_fuzzy=False,
+    )
+    assert message.fuzzy

@@ -13,13 +13,14 @@ from __future__ import annotations
 import datetime
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from copy import copy
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from email import message_from_string
 from heapq import nlargest
 from string import Formatter
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from babel import __version__ as VERSION
 from babel.core import Locale, UnknownLocaleError
@@ -36,8 +37,14 @@ __all__ = [
     'DEFAULT_HEADER',
     'PYTHON_FORMAT',
     'Catalog',
+    'DuplicateTranslationUpdateError',
     'Message',
+    'MessageNotFoundError',
+    'PluralFormsMismatchError',
+    'StaleTranslationError',
     'TranslationError',
+    'TranslationUpdate',
+    'TranslationUpdateError',
 ]
 
 
@@ -329,6 +336,85 @@ class TranslationError(Exception):
     translations are encountered."""
 
 
+class TranslationUpdateError(Exception):
+    """Base class for errors raised when a batch of translation updates
+    cannot be applied atomically.
+
+    When an error of this type is raised, none of the updates in the batch
+    have been applied to the catalog.
+
+    :param update: the :class:`TranslationUpdate` that caused the error, if
+                   applicable
+    """
+
+    def __init__(self, message: str, update: TranslationUpdate | None = None) -> None:
+        super().__init__(message)
+        self.update = update
+
+    def __str__(self) -> str:
+        message = super().__str__()
+        if self.update is None:
+            return message
+        if self.update.context is None:
+            context = ''
+        else:
+            context = f' with context {self.update.context!r}'
+        return f'{message} (message id {self.update.id!r}{context})'
+
+
+class DuplicateTranslationUpdateError(TranslationUpdateError):
+    """Raised when a batch contains more than one update for the same message
+    identity (message ID and context)."""
+
+
+class MessageNotFoundError(TranslationUpdateError):
+    """Raised when an update targets a message that does not exist in the
+    catalog."""
+
+
+class PluralFormsMismatchError(TranslationUpdateError):
+    """Raised when a plural message update provides a different number of
+    translations than the catalog expects for its plural form."""
+
+
+class StaleTranslationError(TranslationUpdateError):
+    """Raised when the translation currently stored in the catalog does not
+    match the expected old translation of an update.
+
+    This indicates that the translation was changed by someone else after
+    the update's baseline was taken.
+    """
+
+
+@dataclass(frozen=True)
+class TranslationUpdate:
+    """A single, baseline-checked translation change.
+
+    The update is only applied when the message identified by :attr:`id`
+    and :attr:`context` currently has exactly :attr:`old_string` as its
+    translation; it is then replaced with :attr:`string`.
+
+    Plain mappings with the same keys (``id``, ``context``,
+    ``old_string``, ``string``) can be used in place of instances of this
+    class.
+
+    :param id: the message ID, or a ``(singular, plural)`` tuple for
+               pluralizable messages
+    :param old_string: the translation expected to be present before the
+                       update; a string for regular messages and a sequence
+                       of strings for pluralizable messages
+    :param string: the new translation; a string for regular messages and a
+                   sequence of strings for pluralizable messages
+    :param context: the message context (``msgctxt``), or ``None`` for no
+                    context
+    """
+
+    id: _MessageID
+    old_string: _MessageID | None
+    string: _MessageID | None
+    context: str | None = None
+
+
 DEFAULT_HEADER = """\
 # Translations template for PROJECT.
 # Copyright (C) YEAR ORGANIZATION
@@ -359,6 +445,61 @@ class ConflictInfo(TypedDict):
     filename: str
     project: str
     version: str
+
+
+def _normalize_translation(
+    value: _MessageID | None,
+    message: Message,
+    num_plurals: int,
+    update: TranslationUpdate,
+) -> str | tuple[str, ...]:
+    """Validate and normalize an expected/new translation for an update."""
+    if message.pluralizable:
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise PluralFormsMismatchError(
+                f'expected a sequence of {num_plurals} plural translations, '
+                f'got {type(value).__name__}',
+                update,
+            )
+        forms: list[str] = []
+        for form in value:
+            if not isinstance(form, str):
+                raise PluralFormsMismatchError(
+                    'every plural translation must be a string',
+                    update,
+                )
+            forms.append(form)
+        if len(forms) != num_plurals:
+            raise PluralFormsMismatchError(
+                f'wrong number of plural translations: expected '
+                f'{num_plurals}, got {len(forms)}',
+                update,
+            )
+        return tuple(forms)
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ''
+    raise PluralFormsMismatchError(
+        f'expected a single translation string, got {type(value).__name__}',
+        update,
+    )
+
+
+def _message_id_matches(update_id: _MessageID, message_id: _MessageID) -> bool:
+    """Check that an update's full message identity matches a catalog
+    message.
+
+    Catalog keys are derived from the singular ID (and context) only, so
+    for pluralizable messages the plural ID has to be compared separately.
+    """
+    update_is_plural = isinstance(update_id, (list, tuple))
+    message_is_plural = isinstance(message_id, (list, tuple))
+    if update_is_plural != message_is_plural:
+        return False
+    if update_is_plural:
+        return tuple(update_id) == tuple(message_id)
+    return update_id == message_id
 
 
 class Catalog:
@@ -898,6 +1039,141 @@ class Catalog:
         key = self._key_for(id, context)
         if key in self._messages:
             del self._messages[key]
+
+    def update_translations(
+        self,
+        updates: Iterable[TranslationUpdate | Mapping[str, Any]],
+        clear_fuzzy: bool = True,
+    ) -> Catalog:
+        """Apply a batch of baseline-checked translation updates atomically.
+
+        Every item identifies a message by its ID and (optional) context
+        and carries both the translation expected to be present
+        (``old_string``) and the translation to set (``string``).  All
+        items are validated first; the catalog is modified only if every
+        single item still matches its baseline, so a stale baseline can
+        never cause part of a batch to be applied.  The catalog itself is
+        returned.
+
+        Items may be :class:`TranslationUpdate` objects, plain mappings
+        with the keys ``id``, ``old_string`` and ``string`` (and optionally
+        ``context``), or ``(id, old_string, string)`` /
+        ``(id, old_string, string, context)`` tuples.
+
+        >>> catalog = Catalog(locale='en')
+        >>> catalog.add('hello', 'hola')
+        <Message ...>
+        >>> catalog.update_translations([
+        ...     TranslationUpdate('hello', 'hola', 'hello!'),
+        ... ])
+        <Catalog ...>
+        >>> catalog['hello'].string
+        'hello!'
+
+        If one of the baselines no longer matches, a
+        :class:`StaleTranslationError` is raised and nothing is changed:
+
+        >>> snapshot = catalog['hello'].string
+        >>> try:
+        ...     catalog.update_translations([
+        ...         TranslationUpdate('hello', 'hola', 'stale'),
+        ...     ])
+        ... except StaleTranslationError:
+        ...     print('stale')
+        stale
+        >>> catalog['hello'].string == snapshot
+        True
+
+        :param updates: an iterable of :class:`TranslationUpdate` objects
+                        or equivalent mappings
+        :param clear_fuzzy: whether the ``fuzzy`` flag is removed from every
+                            message that is part of a successfully applied
+                            batch; defaults to ``True``
+        :raises DuplicateTranslationUpdateError: if the batch contains more
+                                                 than one update for the
+                                                 same message identity
+        :raises MessageNotFoundError: if a targeted message does not exist
+                                      in the catalog
+        :raises PluralFormsMismatchError: if a plural message is given the
+                                          wrong number of translation
+                                          forms, or a regular message is
+                                          given a sequence of forms
+        :raises StaleTranslationError: if the current translation of a
+                                        message does not equal its expected
+                                        ``old_string``
+        """
+        normalized_updates: list[TranslationUpdate] = []
+        for update in updates:
+            if isinstance(update, TranslationUpdate):
+                normalized = update
+            elif isinstance(update, tuple):
+                try:
+                    normalized = TranslationUpdate(*update)
+                except TypeError as error:
+                    raise TranslationUpdateError(
+                        f'invalid translation update tuple: {error}',
+                    ) from None
+            elif isinstance(update, Mapping):
+                try:
+                    normalized = TranslationUpdate(
+                        id=update['id'],
+                        old_string=update['old_string'],
+                        string=update['string'],
+                        context=update.get('context'),
+                    )
+                except KeyError as missing_key:
+                    raise TranslationUpdateError(
+                        f'translation update is missing required key {missing_key!s}',
+                    ) from None
+            else:
+                raise TranslationUpdateError(
+                    f'translation updates must be TranslationUpdate objects '
+                    f'or mappings, got {type(update).__name__}',
+                )
+            normalized_updates.append(normalized)
+
+        seen_keys: set[str | tuple[str, str]] = set()
+        prepared: list[tuple[Message, str | tuple[str, ...]]] = []
+        for update in normalized_updates:
+            message = self.get(update.id, update.context)
+            if message is None:
+                raise MessageNotFoundError(
+                    'no message with the given ID and context found in catalog',
+                    update,
+                )
+            if not _message_id_matches(update.id, message.id):
+                raise MessageNotFoundError(
+                    'the full message ID does not match the message in the catalog',
+                    update,
+                )
+
+            key = self._key_for(update.id, update.context)
+            if key in seen_keys:
+                raise DuplicateTranslationUpdateError(
+                    'the batch contains more than one update for the same message',
+                    update,
+                )
+            seen_keys.add(key)
+
+            old_string = _normalize_translation(
+                update.old_string, message, self.num_plurals, update,
+            )
+            new_string = _normalize_translation(
+                update.string, message, self.num_plurals, update,
+            )
+            if message.string != old_string:
+                raise StaleTranslationError(
+                    'the current translation does not match the expected '
+                    'old translation',
+                    update,
+                )
+            prepared.append((message, new_string))
+
+        for message, new_string in prepared:
+            message.string = new_string
+            if clear_fuzzy:
+                message.flags.discard('fuzzy')
+        return self
 
     def update(
         self,

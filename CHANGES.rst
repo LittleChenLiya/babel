@@ -1,6 +1,14 @@
 Babel Changelog
 ===============
 
+Version 2.19.0
+--------------
+
+Features
+~~~~~~~~
+
+* Messages: Add ``Catalog.update_translations`` for applying a batch of translations with optimistic baseline checks (``TranslationUpdate``); the whole batch is rejected if any expected old translation no longer matches, and ``StaleTranslationError`` / ``MessageNotFoundError`` / ``PluralFormsMismatchError`` / ``DuplicateTranslationUpdateError`` are raised for the respective failures
+
 Version 2.18.0
 --------------
 
