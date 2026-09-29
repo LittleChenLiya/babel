@@ -13,9 +13,19 @@ from babel.messages.catalog import (
     Message,
     TranslationError,
 )
+from babel.messages.split import (
+    CatalogSplitError,
+    MergeConflictError,
+    merge_catalogs,
+    split_catalog,
+)
 
 __all__ = [
     "Catalog",
+    "CatalogSplitError",
+    "MergeConflictError",
     "Message",
     "TranslationError",
+    "merge_catalogs",
+    "split_catalog",
 ]

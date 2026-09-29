@@ -12,6 +12,7 @@ there are interesting features in the pipeline.
 Features
 ~~~~~~~~
 
+* Messages: Add `babel.messages.split` for splitting a catalog by message-location path prefixes and merging the parts back, with translation-conflict detection
 * Core: Add `babel.core.get_cldr_version()` by @akx in :gh:`1242`
 * Core: Use CLDR 47 by @tomasr8 in :gh:`1210`
 * Core: Use canonical IANA zone names in zone_territories by @akx in :gh:`1220`

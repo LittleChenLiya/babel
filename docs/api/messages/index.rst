@@ -11,3 +11,4 @@ the API documentation shows those parts.
    extract
    mofile
    pofile
+   split
