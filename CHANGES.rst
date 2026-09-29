@@ -19,6 +19,7 @@ Features
 * Messages: Merge in per-format keywords and auto_comments by @akx in :gh:`1243`
 * Messages: Update keywords for extraction of dpgettext and dnpgettext by @mardiros in :gh:`1235`
 * Messages: Validate all plurals in Python format checker by @tomasr8 in :gh:`1188`
+* Messages: Add a placeholder contract checker that compares python-format and python-brace-format parameters (names, positions, conversions and nested fields) of every plural branch, reporting missing or extra placeholders and incompatible conversions with the message context and branch index
 * Time: Use standard library `timezone` instead of `FixedOffsetTimezone` by @akx in :gh:`1203`
 
 Bugfixes

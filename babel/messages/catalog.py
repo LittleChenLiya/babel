@@ -259,9 +259,12 @@ class Message:
         errors: list[TranslationError] = []
         for checker in checkers:
             try:
-                checker(catalog, self)
+                result = checker(catalog, self)
             except TranslationError as e:
                 errors.append(e)
+            else:
+                if result is not None:
+                    errors.extend(result)
         return errors
 
     @property
