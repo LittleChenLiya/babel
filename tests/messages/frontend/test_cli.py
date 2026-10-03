@@ -411,6 +411,57 @@ msgstr[2] ""
     assert expected_content == actual_content
 
 
+def test_check_help(cli):
+    with pytest.raises(SystemExit) as ei:
+        cli.run(['pybabel', 'check', '--help'])
+    assert not ei.value.code
+    content = sys.stdout.getvalue().lower()
+    assert 'charset' in content
+    assert '--use-fuzzy' in content
+
+
+def test_check_catalog_clean(cli, tmp_path):
+    po_file = tmp_path / 'messages.po'
+    po_file.write_text(
+        'msgid ""\n'
+        'msgstr ""\n'
+        '"Content-Type: text/plain; charset=utf-8\\n"\n'
+        '\n'
+        'msgid "hello"\n'
+        'msgstr "你好"\n'
+        '\n'
+        'msgid "one"\n'
+        'msgid_plural "two"\n'
+        'msgstr[0] "一"\n'
+        'msgstr[1] "二"\n',
+        encoding='utf-8',
+    )
+    result = cli.run(['pybabel', 'check', '-i', str(po_file)])
+    assert result == 0
+    assert 'no encoding errors found.' in sys.stdout.getvalue()
+
+
+def test_check_catalog_reports_errors(cli, tmp_path):
+    # A PO file whose declared charset does not cover its content cannot even
+    # be parsed by read_po.  The command reports this as a read error (not as
+    # an MO encoding error) and exits with a non-zero status.
+    po_file = tmp_path / 'messages.po'
+    po_file.write_text(
+        'msgid ""\n'
+        'msgstr ""\n'
+        '"Content-Type: text/plain; charset=ascii\\n"\n'
+        '\n'
+        'msgid "hello"\n'
+        'msgstr "你好"\n',
+        encoding='utf-8',
+    )
+    result = cli.run(['pybabel', 'check', '-i', str(po_file)])
+    assert result == 1
+    output = sys.stdout.getvalue()
+    assert 'cannot read PO file' in output
+    assert 'encoding error(s) encountered.' in output
+
+
 def test_compile_catalog(cli):
     po_file = get_po_file_path('de_DE')
     mo_file = po_file.replace('.po', '.mo')

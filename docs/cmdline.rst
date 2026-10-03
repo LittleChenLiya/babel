@@ -71,6 +71,42 @@ looks for all catalog files in the base directory that match the given domain,
 and compiles each of them to MO files in the same directory.
 
 
+check
+=====
+
+The ``check`` sub-command performs a read-only pre-flight check that every
+string a ``compile`` would write to an MO file can be encoded in the catalog's
+charset.  It mirrors the message selection, context separator and plural slot
+concatenation rules used by ``write_mo``, but never modifies the catalog and
+never writes anything.  It reports each unencodable string together with the
+message, the slot and the position of the first unencodable character, so the
+problem can be fixed before compiling::
+
+    $ pybabel check --help
+    Usage: pybabel check [options]
+
+    check that message catalogs can be encoded in their charset
+
+    Options:
+      -h, --help            show this help message and exit
+      -D DOMAIN, --domain=DOMAIN
+                            domains of PO files (space separated list, default
+                            'messages')
+      -d DIRECTORY, --directory=DIRECTORY
+                            path to base directory containing the catalogs
+      -i INPUT_FILE, --input-file=INPUT_FILE
+                            name of the input file
+      -l LOCALE, --locale=LOCALE
+                            locale of the catalog to check
+      -f, --use-fuzzy       also check fuzzy translations
+
+The command exits with a non-zero status if any encoding errors are found.
+Note that fuzzy translations and empty translations are handled exactly as
+they are by ``compile``: fuzzy messages are only checked with ``--use-fuzzy``,
+and empty translations are never checked, as they are not written to the MO
+file.
+
+
 extract
 =======
 
