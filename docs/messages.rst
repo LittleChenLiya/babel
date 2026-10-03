@@ -322,6 +322,80 @@ available, and you should never need to explicitly define them in the
 ``[extractors]`` section.
 
 
+.. _`renaming messages`:
+
+Renaming Messages
+-----------------
+
+Translation maintenance often requires adjusting message IDs in batches --
+for example when a source string is reworded.  Babel supports this with a
+two-phase, *plan-then-apply* interface: you first create a
+:class:`~babel.messages.catalog.RenamePlan` with
+:meth:`Catalog.plan_renames <babel.messages.catalog.Catalog.plan_renames>`,
+which validates every rename and checks for collisions, and then
+:meth:`~babel.messages.catalog.RenamePlan.apply` the plan to produce a new
+catalog.  The catalog the plan was created from is never modified in place.
+
+A message's identity is its ``(msgid, context)`` pair, where the msgid is the
+full ``(singular, plural)`` tuple for pluralizable messages.  Two messages
+with the same msgid but different contexts are distinct identities, so they
+never conflict with each other.
+
+.. code-block:: python
+
+    >>> from babel.messages import Catalog
+    >>> catalog = Catalog()
+    >>> _ = catalog.add('Open', 'Offnen', context='menu',
+    ...                 locations=[('menu.py', 3)], flags=['fuzzy'])
+    >>> _ = catalog.add('Open', 'aufschlagen', context='verb',
+    ...                 locations=[('verb.py', 7)])
+
+    >>> plan = catalog.plan_renames({('Open', 'menu'): 'Launch'})
+    >>> renamed = plan.apply()
+
+    >>> renamed.get('Launch', 'menu').string
+    'Offnen'
+    >>> renamed.get('Launch', 'menu').locations
+    [('menu.py', 3)]
+    >>> renamed.get('Open', 'verb').string
+    'aufschlagen'
+
+    >>> catalog.get('Open', 'menu').id  # the source catalog is unchanged
+    'Open'
+
+The plan preserves the translation, source locations, flags, and comments of
+every renamed message.  Before applying, the plan verifies that every planned
+message is still present in the catalog and still identical to the snapshot
+taken at planning time; if a message was modified in the meantime, applying
+the plan raises an error rather than silently dropping the change.
+
+If two renames (or a rename and an existing message) map to the same
+identity, the whole batch is rejected with a
+:class:`~babel.messages.catalog.RenameConflict` that lists every colliding
+rename -- a conflict is never reported for only one of the colliding inputs.
+
+.. code-block:: python
+
+    >>> catalog = Catalog()
+    >>> _ = catalog.add('Open', 'a', context='menu')
+    >>> _ = catalog.add('Close', 'b', context='menu')
+    >>> try:
+    ...     catalog.plan_renames({
+    ...         ('Open', 'menu'): 'Launch',
+    ...         ('Close', 'menu'): 'Launch',
+    ...     })
+    ... except Exception as e:
+    ...     print(type(e).__name__)
+    RenameConflict
+
+The result catalog contains clones of all messages, so mutating a result
+message's locations or flags never affects the source catalog.
+
+See :class:`~babel.messages.catalog.RenamePlan` and
+:meth:`Catalog.plan_renames <babel.messages.catalog.Catalog.plan_renames>`
+for the full API.
+
+
 --------------------------
 Writing Extraction Methods
 --------------------------

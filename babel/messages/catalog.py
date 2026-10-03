@@ -13,8 +13,8 @@ from __future__ import annotations
 import datetime
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
-from copy import copy
+from collections.abc import Iterable, Iterator, Mapping
+from copy import copy, deepcopy
 from difflib import SequenceMatcher
 from email import message_from_string
 from heapq import nlargest
@@ -37,6 +37,11 @@ __all__ = [
     'PYTHON_FORMAT',
     'Catalog',
     'Message',
+    'RenameConflict',
+    'RenameConflictInfo',
+    'RenameEntry',
+    'RenameError',
+    'RenamePlan',
     'TranslationError',
 ]
 
@@ -327,6 +332,139 @@ class Message:
 class TranslationError(Exception):
     """Exception thrown by translation checkers when invalid message
     translations are encountered."""
+
+
+class RenameError(Exception):
+    """Base class for errors raised while planning or applying message
+    renames with :class:`RenamePlan`.
+    """
+
+
+class RenameConflict(RenameError):
+    """Rename planning failed because two or more renames collide with each
+    other or with messages already present in the catalog.
+
+    The :attr:`conflicts` attribute lists every colliding rename; a conflict
+    is never reported for only one of the colliding inputs.
+    """
+
+    def __init__(self, conflicts: Iterable[RenameConflictInfo]) -> None:
+        self.conflicts = list(conflicts)
+        lines = [
+            f"could not plan renames: {len(self.conflicts)} conflict(s) detected:",
+        ]
+        for conflict in self.conflicts:
+            lines.append(f"  * {conflict}")
+        super().__init__("\n".join(lines))
+
+
+class RenameConflictInfo:
+    """A single collision reported by :class:`RenameConflict`.
+
+    :param entries: the rename entries that collide with one another
+    :param reason: human-readable explanation of the collision
+    :param existing: messages already present in the catalog that would be
+                     overwritten by the renames
+    """
+
+    def __init__(
+        self,
+        entries: Iterable[RenameEntry],
+        reason: str,
+        existing: Iterable[Message] = (),
+    ) -> None:
+        self.entries = list(entries)
+        self.existing = list(existing)
+        self.reason = reason
+
+    def __str__(self) -> str:
+        lines = [self.reason]
+        for entry in self.entries:
+            lines.append(
+                f"    - rename {entry.source_id!r} (context={entry.source_context!r})"
+                f" -> {entry.target_id!r}",
+            )
+        for message in self.existing:
+            lines.append(
+                f"    - overwrites existing message {message.id!r} "
+                f"(context={message.context!r})",
+            )
+        return "\n".join(lines)
+
+
+class RenameEntry:
+    """A single planned rename of one message.
+
+    :param source_id: the message ID at plan time
+    :param source_context: the message context at plan time
+    :param target_id: the message ID the message will be renamed to
+    :param message: a snapshot clone of the message taken at plan time
+    """
+
+    def __init__(
+        self,
+        source_id: _MessageID,
+        source_context: str | None,
+        target_id: _MessageID,
+        message: Message,
+    ) -> None:
+        self.source_id = source_id
+        self.source_context = source_context
+        self.target_id = target_id
+        self.message = message
+
+
+def _resolve_rename_source(key: object) -> tuple[_MessageID, str | None]:
+    """Resolve a rename mapping key to a ``(msgid, context)`` pair.
+
+    A key may be:
+
+    * a :class:`Message` object (its :attr:`~Message.id` and
+      :attr:`~Message.context` are used),
+    * a plain msgid string (meaning no context), or
+    * a ``(msgid, context)`` tuple.
+
+    A bare ``(msgid, context)`` tuple always denotes a context pair; to
+    rename a pluralizable message without context, use
+    ``((singular, plural), None)``.
+    """
+    if isinstance(key, Message):
+        return key.id, key.context
+    if isinstance(key, str):
+        return key, None
+    if isinstance(key, tuple) and len(key) == 2:
+        msgid, context = key
+        if isinstance(msgid, (str, tuple, list)) and (
+            context is None or isinstance(context, str)
+        ):
+            return msgid, context
+    raise RenameError(
+        f"invalid rename key {key!r}: expected a msgid string, a "
+        "(msgid, context) pair, or a Message object",
+    )
+
+
+def _normalize_rename_target(message: Message, new_id: object) -> _MessageID:
+    """Validate and normalize the target msgid of a planned rename."""
+    if message.pluralizable:
+        if isinstance(new_id, str):
+            raise RenameError(
+                f"cannot rename plural message {message.id!r} to singular "
+                f"{new_id!r}: provide a (singular, plural) tuple",
+            )
+        new_id = tuple(new_id)
+        if len(new_id) != len(message.id):
+            raise RenameError(
+                f"cannot rename plural message {message.id!r} to {new_id!r}: "
+                "the number of forms must match",
+            )
+    else:
+        if not isinstance(new_id, str):
+            raise RenameError(
+                f"cannot rename singular message {message.id!r} to "
+                f"{new_id!r}: expected a msgid string",
+            )
+    return new_id
 
 
 DEFAULT_HEADER = """\
@@ -1089,3 +1227,270 @@ class Catalog:
             if message_1 is None or message_2 is None or not message_1.is_identical(message_2):
                 return False
         return dict(self.mime_headers) == dict(other.mime_headers)
+
+    def plan_renames(self, renames: Mapping | Iterable) -> RenamePlan:
+        """Plan a batch of message renames without modifying the catalog.
+
+        Translation maintenance often requires adjusting many message IDs at
+        once.  This is a two-phase operation: first a :class:`RenamePlan` is
+        created, which validates every rename and checks that no two renames
+        (or a rename and an existing message) collide; then the plan is
+        :meth:`applied <RenamePlan.apply>` to produce a new catalog.  The
+        catalog the plan was created from is never modified in place.
+
+        A message's identity is its ``(msgid, context)`` pair, where the
+        msgid is the full ``(singular, plural)`` tuple for pluralizable
+        messages.  Two messages with the same msgid but different contexts
+        are distinct identities and never conflict with each other.
+
+        :param renames: a mapping (or an iterable of ``(source, new_id)``
+                        pairs) where ``source`` is a msgid string, a
+                        ``(msgid, context)`` pair, or a :class:`Message`,
+                        and ``new_id`` is the new msgid (a string, or a
+                        ``(singular, plural)`` tuple for pluralizable
+                        messages)
+        :return: the planned renames
+        :raises RenameConflict: if two or more renames map to the same
+                                identity, or a rename would overwrite an
+                                existing message
+        :raises RenameError: if a source message does not exist or a target
+                             msgid is invalid
+
+        >>> catalog = Catalog()
+        >>> menu_open = catalog.add('Open', 'Offnen', context='menu',
+        ...                         locations=[('menu.py', 3)],
+        ...                         flags=['fuzzy'])
+        >>> verb_open = catalog.add('Open', 'aufschlagen', context='verb',
+        ...                         locations=[('verb.py', 7)])
+        >>> plan = catalog.plan_renames({('Open', 'menu'): 'Launch'})
+        >>> renamed = plan.apply()
+        >>> renamed.get('Launch', 'menu').string
+        'Offnen'
+        >>> renamed.get('Launch', 'menu').locations
+        [('menu.py', 3)]
+        >>> renamed.get('Open', 'verb').string
+        'aufschlagen'
+        >>> catalog.get('Open', 'menu').id  # the source catalog is unchanged
+        'Open'
+        """
+        return RenamePlan(self, renames)
+
+    def apply_renames(self, plan: RenamePlan) -> Catalog:
+        """Apply a previously planned batch of message renames.
+
+        This is a convenience wrapper around :meth:`RenamePlan.apply` that
+        also verifies the plan was created for this catalog.
+
+        :param plan: the rename plan to apply
+        :return: a new catalog with the renames applied
+        :raises TypeError: if ``plan`` is not a :class:`RenamePlan`
+        :raises RenameError: if the plan was created for a different catalog,
+                             or a planned message was modified after planning
+        :raises RenameConflict: if applying the plan would cause a collision
+        """
+        if not isinstance(plan, RenamePlan):
+            raise TypeError(
+                f"expected a RenamePlan, got {type(plan).__name__}",
+            )
+        if plan.catalog is not self:
+            raise RenameError("the rename plan was created for a different catalog")
+        return plan.apply()
+
+
+class RenamePlan:
+    """A planned batch of message renames for a :class:`Catalog`.
+
+    A plan is created with :meth:`Catalog.plan_renames`.  Planning validates
+    every rename and detects collisions; applying the plan with :meth:`apply`
+    produces a new catalog and never modifies the catalog the plan was
+    created from.
+
+    Before applying, the plan verifies that every planned message is still
+    present in the catalog and still identical to the snapshot taken at
+    planning time.  The resulting catalog contains clones of all messages,
+    so mutating a result message's lists never affects the source catalog.
+
+    >>> catalog = Catalog()
+    >>> catalog.add(('Open', 'Opens'), ('Offnen', 'Offnen'), context='menu')
+    <Message ...>
+    >>> plan = catalog.plan_renames({
+    ...     (('Open', 'Opens'), 'menu'): ('Launch', 'Launches'),
+    ... })
+    >>> renamed = plan.apply()
+    >>> renamed.get(('Launch', 'Launches'), 'menu').string
+    ('Offnen', 'Offnen')
+    """
+
+    def __init__(self, catalog: Catalog, renames: Mapping | Iterable) -> None:
+        self.catalog = catalog
+        self._entries: list[RenameEntry] = []
+
+        messages = self._current_messages()
+
+        if isinstance(renames, Mapping):
+            items = renames.items()
+        else:
+            items = renames
+
+        entries = []
+        for source, new_id in items:
+            source_id, source_context = _resolve_rename_source(source)
+            message = messages.get((source_id, source_context))
+            if message is None:
+                raise RenameError(
+                    f"cannot rename message {source_id!r} "
+                    f"(context={source_context!r}): no such message in the catalog",
+                )
+            target_id = _normalize_rename_target(message, new_id)
+            entries.append(
+                RenameEntry(source_id, source_context, target_id, message.clone()),
+            )
+
+        conflicts = self._find_conflicts(entries, messages)
+        if conflicts:
+            raise RenameConflict(conflicts)
+
+        self._entries = entries
+
+    def __len__(self) -> int:
+        """The number of planned renames."""
+        return len(self._entries)
+
+    def __iter__(self) -> Iterator[RenameEntry]:
+        """Iterate over the planned rename entries."""
+        return iter(self._entries)
+
+    def _current_messages(self) -> dict[tuple[_MessageID, str | None], Message]:
+        """All non-header messages keyed by their full identity."""
+        messages = {}
+        # Iterate the internal mapping directly: ``Catalog.__iter__`` builds
+        # the header via ``mime_headers`` which requires locale data.
+        for message in self.catalog._messages.values():
+            if not message.id:
+                continue
+            messages[(message.id, message.context)] = message
+        return messages
+
+    def _find_conflicts(
+        self,
+        entries: Iterable[RenameEntry],
+        messages: Mapping[tuple[_MessageID, str | None], Message],
+    ) -> list[RenameConflictInfo]:
+        """Detect renames that would collide in the resulting catalog.
+
+        The catalog's internal keying only keeps the singular id for
+        pluralizable messages, so two distinct full identities can end up
+        sharing one key in the result.  Every such collision is reported,
+        listing all renames and any existing messages involved.
+        """
+        entries = list(entries)
+        source_identities = {(entry.source_id, entry.source_context) for entry in entries}
+        entries_by_source = {
+            (entry.source_id, entry.source_context): entry for entry in entries
+        }
+
+        by_collapsed: dict[object, list[tuple[_MessageID, str | None]]] = defaultdict(list)
+        for identity, message in messages.items():
+            if identity in source_identities:
+                entry = entries_by_source[identity]
+                collapsed = self.catalog._key_for(
+                    entry.target_id,
+                    entry.source_context,
+                )
+            else:
+                collapsed = self.catalog._key_for(message.id, message.context)
+            by_collapsed[collapsed].append(identity)
+
+        conflicts = []
+        for collapsed, group in by_collapsed.items():
+            if len(group) <= 1:
+                continue
+            renames = [entries_by_source[i] for i in group if i in entries_by_source]
+            existing = [messages[i] for i in group if i not in entries_by_source]
+            target_identities = {(entry.target_id, entry.source_context) for entry in renames}
+            if len(target_identities) == 1 and not existing:
+                reason = (
+                    f"{len(renames)} renames map to the same message identity "
+                    f"{next(iter(target_identities))!r}; their translations "
+                    "would overwrite one another"
+                )
+            else:
+                reason = (
+                    f"renames collide in the resulting catalog at key "
+                    f"{collapsed!r}; translations would be overwritten"
+                )
+            conflicts.append(RenameConflictInfo(renames, reason, existing=existing))
+        return conflicts
+
+    def apply(self) -> Catalog:
+        """Apply the planned renames and return the resulting catalog.
+
+        The source catalog is not modified.  Before applying, every planned
+        message is checked to still be present and identical to the snapshot
+        taken at planning time.
+
+        :return: a new catalog with the renames applied
+        :raises RenameError: if a planned message was removed or modified
+                             after planning
+        :raises RenameConflict: if applying the plan would cause a collision
+        """
+        messages = self._current_messages()
+        for entry in self._entries:
+            current = messages.get((entry.source_id, entry.source_context))
+            if current is None:
+                raise RenameError(
+                    f"message {entry.source_id!r} (context={entry.source_context!r}) "
+                    "was removed from the catalog after the plan was made; "
+                    "re-plan before applying",
+                )
+            if not current.is_identical(entry.message):
+                raise RenameError(
+                    f"message {entry.source_id!r} (context={entry.source_context!r}) "
+                    "was modified after the plan was made; re-plan before applying",
+                )
+
+        conflicts = self._find_conflicts(self._entries, messages)
+        if conflicts:
+            raise RenameConflict(conflicts)
+
+        return self._build_result()
+
+    def _build_result(self) -> Catalog:
+        catalog = self.catalog
+        result = Catalog(
+            locale=catalog.locale,
+            domain=catalog.domain,
+            header_comment=catalog.header_comment,
+            project=catalog.project,
+            version=catalog.version,
+            copyright_holder=catalog.copyright_holder,
+            msgid_bugs_address=catalog.msgid_bugs_address,
+            creation_date=catalog.creation_date,
+            revision_date=catalog.revision_date,
+            last_translator=catalog.last_translator,
+            language_team=catalog.language_team,
+            charset=catalog.charset,
+            fuzzy=catalog.fuzzy,
+        )
+
+        entries_by_source = {
+            (entry.source_id, entry.source_context): entry for entry in self._entries
+        }
+        result_messages = {}
+        for message in catalog._messages.values():
+            if not message.id:
+                continue
+            new_message = message.clone()
+            entry = entries_by_source.get((message.id, message.context))
+            if entry is not None:
+                new_message.id = entry.target_id
+                # Rename only changes the msgid; the context is preserved.
+            key = result._key_for(new_message.id, new_message.context)
+            result_messages[key] = new_message
+        result._messages = result_messages
+
+        # Preserve obsolete messages as independent clones.
+        result.obsolete = {key: message.clone() for key, message in catalog.obsolete.items()}
+        # Preserve extraction conflicts as independent copies.
+        result._conflicts = deepcopy(catalog._conflicts)
+        return result
