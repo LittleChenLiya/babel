@@ -424,3 +424,49 @@ more productive.
 .. note:: Whether translator comments can be extracted depends on the extraction
           method in use. The Python extractor provided by Babel does implement
           this feature, but others may not.
+
+Renaming Message IDs
+--------------------
+
+.. versionadded:: 2.19
+
+When maintenance work requires adjusting many ``msgid``\ s at once, the
+catalog offers a plan-then-apply rename interface that never modifies the
+source catalog in place:
+
+.. code-block:: python
+
+    from babel.messages.catalog import Catalog
+
+    catalog = ...  # e.g. read from a PO file with babel.messages.pofile
+
+    # 1. Plan the batch; the catalog is only inspected, never changed.
+    plan = catalog.plan_renames([
+        ('Open', 'Launch', 'menu'),   # (old_id, new_id, context)
+        ('Close', 'Dismiss', 'menu'),
+    ])
+
+    # 2. Apply the plan; a *new* catalog is returned.
+    renamed = catalog.apply_renames(plan)
+
+Message identity consists of the message ID *and* its context
+(``msgctxt``), plus the plural forms for pluralizable messages — so
+``Open`` with context ``menu`` and ``Open`` with context ``verb`` are
+renamed independently, and a plural message is addressed by its full
+``(singular, plural)`` tuple.  Comments, locations and flags are carried
+over to the renamed messages, and the messages of the returned catalog
+share no mutable state with the source catalog.
+
+Applying a plan is all-or-nothing and fails safely:
+
+* If a message affected by the plan was modified or removed after
+  planning, :exc:`~babel.messages.catalog.StaleRenamePlanError` is raised
+  and nothing is applied — re-plan from the current catalog instead.
+* If two renames would map different messages to the same identity, or a
+  rename target is already occupied by a message that is not itself being
+  renamed away, :exc:`~babel.messages.catalog.RenameConflictError` is
+  raised listing *all* conflicting renames, and no translation is
+  silently overwritten.
+
+See :class:`babel.messages.catalog.Catalog.plan_renames` and
+:meth:`babel.messages.catalog.Catalog.apply_renames` for details.

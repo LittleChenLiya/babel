@@ -1,6 +1,20 @@
 Babel Changelog
 ===============
 
+Version 2.19.0
+--------------
+
+(Unreleased)
+
+Features
+~~~~~~~~
+
+* Messages: Add a plan-then-apply catalog rename API
+  (``Catalog.plan_renames`` / ``Catalog.apply_renames``) that renames
+  message IDs in batch without modifying the source catalog in place,
+  detects stale plans and conflicting rename targets, and preserves
+  comments, locations and flags.
+
 Version 2.18.0
 --------------
 

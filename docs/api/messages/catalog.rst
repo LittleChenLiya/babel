@@ -20,7 +20,31 @@ Messages
 .. autoclass:: Message
    :members:
 
+Renaming
+--------
+
+.. autoclass:: RenameSpec
+   :members:
+
+.. autoclass:: RenamePlan
+   :members:
+
+.. autoclass:: RenameOperation
+   :members:
+
+.. autoclass:: RenameConflict
+   :members:
+
+.. autoclass:: StaleRename
+   :members:
+
 Exceptions
 ----------
 
 .. autoexception:: TranslationError
+
+.. autoexception:: RenamePlanError
+
+.. autoexception:: StaleRenamePlanError
+
+.. autoexception:: RenameConflictError
