@@ -39,7 +39,7 @@ from babel.messages.extract import (
     check_and_call_extract_file,
     extract_from_dir,
 )
-from babel.messages.mofile import write_mo
+from babel.messages.mofile import check_mo_charset, write_mo
 from babel.messages.pofile import read_po, write_po
 from babel.util import LOCALTZ
 
@@ -282,6 +282,85 @@ class CompileCatalog(CommandMixin):
                 write_mo(outfile, catalog, use_fuzzy=self.use_fuzzy)
 
         return catalogs_and_errors
+
+
+class CheckCatalog(CommandMixin):
+    description = 'check message catalogs for MO charset encoding problems'
+    user_options = [
+        ('domain=', 'D',
+         "domains of PO files (space separated list, default 'messages')"),
+        ('directory=', 'd',
+         'path to base directory containing the catalogs'),
+        ('input-file=', 'i',
+         'name of the input file'),
+        ('locale=', 'l',
+         'locale of the catalog to check'),
+        ('use-fuzzy', 'f',
+         'also check fuzzy translations'),
+        ('charset=', None,
+         "charset to check against (default: the catalog's own charset); "
+         'the catalog itself is never modified'),
+    ]  # fmt: skip
+    boolean_options = ['use-fuzzy']
+
+    def initialize_options(self):
+        self.domain = 'messages'
+        self.directory = None
+        self.input_file = None
+        self.locale = None
+        self.use_fuzzy = False
+        self.charset = None
+
+    def finalize_options(self):
+        self.domain = listify_value(self.domain)
+        if not self.input_file and not self.directory:
+            raise OptionError('you must specify either the input file or the base directory')
+
+    def _get_po_files(self, domain: str):
+        if not self.input_file:
+            dir_path = pathlib.Path(self.directory)
+            if self.locale:
+                yield dir_path / self.locale / "LC_MESSAGES" / f"{domain}.po"
+            else:
+                for locale_path in sorted(dir_path.iterdir()):
+                    po_file = locale_path / "LC_MESSAGES" / f"{domain}.po"
+                    if po_file.exists():
+                        yield po_file
+        else:
+            yield pathlib.Path(self.input_file)
+
+    def run(self):
+        n_errors = 0
+        for domain in self.domain:
+            po_files = list(self._get_po_files(domain))
+            if not po_files:
+                raise OptionError(f'no message catalogs found for domain {domain!r}')
+            for po_file in po_files:
+                with open(po_file, 'rb') as infile:
+                    catalog = read_po(infile, self.locale)
+                errors = check_mo_charset(
+                    catalog,
+                    use_fuzzy=self.use_fuzzy,
+                    charset=self.charset,
+                )
+                for error in errors:
+                    n_errors += 1
+                    self.log.error(
+                        'error: %s:%s: message %r: %s',
+                        po_file,
+                        error.message.lineno or 0,
+                        error.message.id,
+                        error,
+                    )
+                if not errors:
+                    self.log.info(
+                        'catalog %s is encodable with charset %r',
+                        po_file,
+                        self.charset or catalog.charset,
+                    )
+        if n_errors:
+            self.log.error('%d encoding errors encountered.', n_errors)
+        return 1 if n_errors else 0
 
 
 def _make_directory_filter(ignore_patterns):
@@ -1141,6 +1220,7 @@ class CommandLineInterface:
     version = f'%prog {VERSION}'
     commands = {
         'compile': 'compile message catalogs to MO files',
+        'check': 'check message catalogs for MO charset encoding problems',
         'extract': 'extract messages from source files and generate a POT file',
         'init': 'create new message catalogs from a POT file',
         'update': 'update existing message catalogs from a POT file',
@@ -1150,6 +1230,7 @@ class CommandLineInterface:
 
     command_classes = {
         'compile': CompileCatalog,
+        'check': CheckCatalog,
         'extract': ExtractMessages,
         'init': InitCatalog,
         'update': UpdateCatalog,

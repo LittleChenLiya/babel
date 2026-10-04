@@ -13,6 +13,8 @@
 import os
 from io import BytesIO
 
+import pytest
+
 from babel.messages import Catalog, mofile
 from babel.support import Translations
 
@@ -104,3 +106,138 @@ def test_read_mo_decodes_message_context() -> None:
     assert message.context == 'ほげ'
     assert message.string == 'åäöÅÄÖ'
     assert not catalog.get('x')  # Not without the context
+
+
+def _snapshot_catalog(catalog):
+    return (
+        catalog.charset,
+        catalog.fuzzy,
+        [(m.id, m.string, frozenset(m.flags), m.context) for m in catalog],
+    )
+
+
+def test_check_mo_charset_ascii_reports_slot_and_position():
+    catalog = Catalog(locale='zh_CN', charset='ascii')
+    catalog.add('hello', '你好')
+    catalog.add('ok', 'fine')
+
+    errors = mofile.check_mo_charset(catalog)
+
+    assert len(errors) == 1
+    error = errors[0]
+    assert error.message is catalog['hello']
+    assert error.slot == 'msgstr'
+    assert error.position == 0
+    assert error.character == '你'
+    assert isinstance(error.error, UnicodeEncodeError)
+    assert 'msgstr' in str(error)
+
+
+def test_check_mo_charset_utf8_passes_and_catalog_unmodified():
+    catalog = Catalog(locale='zh_CN', charset='utf-8')
+    catalog.add('hello', '你好')
+    catalog.add(('bar', 'bars'), ('条', '些条'), flags=['fuzzy'])
+    catalog.add('ctx', '上下文', context='menu')
+    before = _snapshot_catalog(catalog)
+
+    assert mofile.check_mo_charset(catalog) == []
+    assert mofile.check_mo_charset(catalog, use_fuzzy=True) == []
+    assert _snapshot_catalog(catalog) == before
+
+
+def test_check_mo_charset_does_not_modify_catalog_on_failure():
+    catalog = Catalog(locale='zh_CN', charset='ascii')
+    catalog.add('hello', '你好', flags=['fuzzy'])
+    before = _snapshot_catalog(catalog)
+
+    errors = mofile.check_mo_charset(catalog, use_fuzzy=True)
+
+    assert errors
+    assert _snapshot_catalog(catalog) == before
+
+
+def test_check_mo_charset_plural_second_slot():
+    catalog = Catalog(locale='zh_CN', charset='ascii')
+    catalog.add(('one thing', 'many things'), ('one', '许多东西'))
+
+    errors = mofile.check_mo_charset(catalog)
+
+    assert [(e.slot, e.position, e.character) for e in errors] == [
+        ('msgstr[1]', 0, '许'),
+    ]
+    assert errors[0].message.id == ('one thing', 'many things')
+
+
+def test_check_mo_charset_context_locatable():
+    catalog = Catalog(locale='zh_CN', charset='ascii')
+    catalog.add('verb', '跑', context='菜单')
+    catalog.add('plain', 'plain')
+
+    errors = mofile.check_mo_charset(catalog)
+
+    assert [(e.slot, e.position, e.character) for e in errors] == [
+        ('msgctxt', 0, '菜'),
+        ('msgstr', 0, '跑'),
+    ]
+    for error in errors:
+        assert error.message.context == '菜单'
+        assert error.message.id == 'verb'
+
+
+def test_check_mo_charset_fuzzy_and_empty_are_selection_not_errors():
+    catalog = Catalog(locale='zh_CN', charset='ascii')
+    catalog.add('fuzzy one', '模糊', flags=['fuzzy'])
+    catalog.add('empty one', '')
+    catalog.add(('empty plural', 'empty plurals'), ('', ''))
+
+    # Fuzzy and untranslated messages are skipped by write_mo (and thus by
+    # the check) by default; that is output selection, not an encoding error.
+    assert mofile.check_mo_charset(catalog) == []
+
+    # With use_fuzzy=True the fuzzy message is written, so it is checked.
+    errors = mofile.check_mo_charset(catalog, use_fuzzy=True)
+    assert [(e.message.id, e.slot) for e in errors] == [('fuzzy one', 'msgstr')]
+
+
+def test_check_mo_charset_charset_override_does_not_touch_catalog():
+    catalog = Catalog(locale='zh_CN', charset='utf-8')
+    catalog.add('hello', '你好')
+
+    assert mofile.check_mo_charset(catalog, charset='ascii')
+    assert catalog.charset == 'utf-8'
+
+
+def test_check_mo_charset_matches_write_mo_results():
+    # A clean catalog: the check passes and write_mo succeeds.
+    clean = Catalog(locale='en_US', charset='ascii')
+    clean.add('foo', 'Voh')
+    clean.add(('bar', 'bars'), ('Bahr', 'Bahrs'))
+    clean.add('ctx', 'CTX', context='menu')
+    assert mofile.check_mo_charset(clean) == []
+    buf = BytesIO()
+    mofile.write_mo(buf, clean)
+    assert buf.getvalue()
+
+    # A catalog with unencodable strings: the check reports exactly the
+    # pieces that make write_mo fail with UnicodeEncodeError.
+    bad = Catalog(locale='zh_CN', charset='ascii')
+    bad.add('hello', '你好')
+    bad.add(('one', 'many'), ('一', '许多'))
+    bad.add('verb', '跑', context='菜单')
+    errors = mofile.check_mo_charset(bad)
+    assert [(e.message.id, e.slot) for e in errors] == [
+        ('hello', 'msgstr'),
+        (('one', 'many'), 'msgstr[0]'),
+        (('one', 'many'), 'msgstr[1]'),
+        ('verb', 'msgctxt'),
+        ('verb', 'msgstr'),
+    ]
+    with pytest.raises(UnicodeEncodeError):
+        mofile.write_mo(BytesIO(), bad)
+
+    # Every reported piece is genuinely unencodable, and re-encoding the
+    # reported string reproduces the reported error position.
+    for error in errors:
+        with pytest.raises(UnicodeEncodeError) as excinfo:
+            error.string.encode(bad.charset)
+        assert excinfo.value.start == error.position

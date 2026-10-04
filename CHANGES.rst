@@ -1,6 +1,17 @@
 Babel Changelog
 ===============
 
+Unreleased
+----------
+
+Features
+~~~~~~~~
+
+* Messages: Add ``babel.messages.mofile.check_mo_charset`` and the
+  ``pybabel check`` command to report, up front, which catalog strings
+  cannot be encoded with the charset a compiled MO file would use
+
+
 Version 2.18.0
 --------------
 

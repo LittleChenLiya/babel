@@ -10,3 +10,8 @@ out.
 .. autofunction:: read_mo
 
 .. autofunction:: write_mo
+
+.. autofunction:: check_mo_charset
+
+.. autoclass:: MoEncodingError
+   :members:

@@ -25,6 +25,7 @@ When properly installed, Babel provides a script called ``pybabel``::
 
     commands:
       compile  compile message catalogs to MO files
+      check    check message catalogs for MO charset encoding problems
       extract  extract messages from source files and generate a POT file
       init     create new message catalogs from a POT file
       update   update existing message catalogs from a POT file
@@ -69,6 +70,43 @@ of the output file will be::
 If neither the ``input_file`` nor the ``locale`` option is set, this command
 looks for all catalog files in the base directory that match the given domain,
 and compiles each of them to MO files in the same directory.
+
+
+check
+=====
+
+The ``check`` sub-command performs a read-only check that every message and
+translation in a catalog can actually be encoded with the charset the
+compiled MO file would use, so encoding problems are reported up front
+instead of surfacing halfway through ``compile``::
+
+    $ pybabel check --help
+    Usage: pybabel check [options]
+
+    check message catalogs for MO charset encoding problems
+
+    Options:
+      -h, --help            show this help message and exit
+      -D DOMAIN, --domain=DOMAIN
+                            domains of PO files (space separated list, default
+                            'messages')
+      -d DIRECTORY, --directory=DIRECTORY
+                            path to base directory containing the catalogs
+      -i INPUT_FILE, --input-file=INPUT_FILE
+                            name of the input file
+      -l LOCALE, --locale=LOCALE
+                            locale of the catalog to check
+      -f, --use-fuzzy       also check fuzzy translations
+      --charset=CHARSET     charset to check against (default: the catalog's
+                            own charset); the catalog itself is never modified
+
+For each string that cannot be encoded, the report names the catalog file,
+the message, the slot (``msgctxt``, ``msgid``, ``msgid_plural``, ``msgstr``
+or ``msgstr[<n>]`` for plural translations) and the position of the first
+unencodable character.  The command exits with status 1 if any encoding
+problems were found, and 0 otherwise.  The catalog is never modified, and
+messages skipped because they are fuzzy (without ``--use-fuzzy``) or
+untranslated are not reported as errors.
 
 
 extract

@@ -11,6 +11,7 @@ Writing of files in the ``gettext`` MO (machine object) format.
 from __future__ import annotations
 
 import array
+import dataclasses
 import struct
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,49 @@ if TYPE_CHECKING:
 
 LE_MAGIC: int = 0x950412DE
 BE_MAGIC: int = 0xDE120495
+
+
+@dataclasses.dataclass(frozen=True)
+class MoEncodingError:
+    """Description of a single catalog string that cannot be encoded with
+    the charset a MO file would be written in.
+
+    Instances of this class are returned by `check_mo_charset`; they are
+    never raised.
+    """
+
+    #: The message the offending string belongs to.
+    message: Message
+
+    #: The slot the offending string would be written to, using PO file
+    #: terminology: ``'msgctxt'``, ``'msgid'``, ``'msgid_plural'``,
+    #: ``'msgstr'`` or ``'msgstr[<n>]'`` for plural translations.
+    slot: str
+
+    #: The exact string that failed to encode.  For plural translations this
+    #: is the string of the individual slot, after `write_mo`'s fallback of
+    #: empty translations to the corresponding message ID has been applied.
+    string: str
+
+    #: The original `UnicodeEncodeError` raised when encoding `string`.
+    error: UnicodeEncodeError
+
+    @property
+    def position(self) -> int:
+        """The offset of the first unencodable character within `string`."""
+        return self.error.start
+
+    @property
+    def character(self) -> str:
+        """The first character of `string` that cannot be encoded."""
+        return self.string[self.error.start]
+
+    def __str__(self) -> str:
+        return (
+            f"{self.slot}: cannot encode character {self.character!r} "
+            f"at position {self.position} "
+            f"with charset {self.error.encoding!r}"
+        )
 
 
 def read_mo(fileobj: SupportsRead[bytes]) -> Catalog:
@@ -213,3 +257,77 @@ def write_mo(fileobj: SupportsWrite[bytes], catalog: Catalog, use_fuzzy: bool = 
     )
 
     fileobj.write(header + array.array.tobytes(array.array("i", offsets)) + ids + strs)
+
+
+def check_mo_charset(
+    catalog: Catalog,
+    use_fuzzy: bool = False,
+    charset: str | None = None,
+) -> list[MoEncodingError]:
+    """Check whether all strings of a catalog can be encoded with the charset
+    a MO file would be written in, without writing anything.
+
+    This is a read-only, up-front counterpart to `write_mo`: it selects the
+    exact same messages and splits them into the exact same pieces (message
+    IDs, context prefixes joined with the ``\\x04`` separator, and individual
+    plural translation slots, including the fallback of empty translations to
+    the message ID) and reports every piece that cannot be encoded, so
+    encoding problems surface before `write_mo` fails halfway through writing
+    output.
+
+    The check does not modify the catalog in any way: neither its charset nor
+    any of its messages or translations are changed.  Messages that
+    `write_mo` would skip because of the `use_fuzzy` option or because their
+    translation is empty are skipped here as well; being fuzzy or untranslated
+    is an output selection matter, not an encoding error, and is never
+    reported as one.
+
+    >>> catalog = Catalog(locale='zh_CN', charset='ascii')
+    >>> catalog.add('hello', '你好')
+    <Message ...>
+    >>> for error in check_mo_charset(catalog):
+    ...     print(error.slot, error.position, error.character)
+    msgstr 0 你
+    >>> catalog.charset = 'utf-8'
+    >>> check_mo_charset(catalog)
+    []
+
+    :param catalog: the `Catalog` instance to check
+    :param use_fuzzy: whether translations marked as "fuzzy" should be
+                      included in the check (mirrors the `write_mo` option)
+    :param charset: the charset to check against; defaults to the catalog's
+                    own charset, which is left untouched either way
+    :return: a list of `MoEncodingError` objects, one per string piece that
+             cannot be encoded; empty if `write_mo` would not fail
+    """
+    if charset is None:
+        charset = catalog.charset
+
+    # Select exactly the messages write_mo would write out, in the same order.
+    messages = list(catalog)
+    messages[1:] = [m for m in messages[1:] if m.string and (use_fuzzy or not m.fuzzy)]
+    messages.sort()
+
+    errors: list[MoEncodingError] = []
+
+    for message in messages:
+        pieces: list[tuple[str, str]] = []
+        if message.context:
+            pieces.append(('msgctxt', message.context))
+        if message.pluralizable:
+            pieces.append(('msgid', message.id[0]))
+            pieces.append(('msgid_plural', message.id[1]))
+            for idx, string in enumerate(message.string):
+                if not string:
+                    string = message.id[min(int(idx), 1)]
+                pieces.append((f'msgstr[{idx}]', string))
+        else:
+            pieces.append(('msgid', message.id))
+            pieces.append(('msgstr', message.string))
+        for slot, string in pieces:
+            try:
+                string.encode(charset)
+            except UnicodeEncodeError as exc:
+                errors.append(MoEncodingError(message=message, slot=slot, string=string, error=exc))
+
+    return errors
