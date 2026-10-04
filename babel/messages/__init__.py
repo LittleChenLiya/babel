@@ -13,9 +13,23 @@ from babel.messages.catalog import (
     Message,
     TranslationError,
 )
+from babel.messages.merge import (
+    Conflict,
+    Location,
+    MergedMessage,
+    MergeResult,
+    SourceRecord,
+    merge_extraction_results,
+)
 
 __all__ = [
     "Catalog",
+    "Conflict",
+    "Location",
+    "MergeResult",
+    "MergedMessage",
     "Message",
+    "SourceRecord",
     "TranslationError",
+    "merge_extraction_results",
 ]

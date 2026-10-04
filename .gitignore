@@ -11,6 +11,7 @@
 .benchmarks
 .coverage
 .idea
+.tmp
 .tox
 /venv*
 babel/global.dat
