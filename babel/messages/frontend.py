@@ -1130,6 +1130,61 @@ class MergeCatalog(CommandMixin):
             )
 
 
+class MergeComments(CommandMixin):
+    description = 'merge translator comments from source PO directories into a target PO directory'
+    user_options = [
+        ('target-dir=', 't',
+         'path to the target directory containing the PO files to update'),
+        ('source-dir=', 's',
+         'path to a source directory containing PO files with translator '
+         'comments to merge; may be specified more than once'),
+        ('domain=', 'd',
+         'only merge the PO file for this domain (e.g. "messages")'),
+        ('charset=', None,
+         'character set used to read the PO files (defaults to the catalog charset)'),
+        ('dry-run', 'n',
+         'report the plan without applying it'),
+    ]  # fmt: skip
+
+    multiple_value_options = (
+        'source-dir',
+    )
+
+    boolean_options = [
+        'dry-run',
+    ]
+
+    def initialize_options(self):
+        self.target_dir = None
+        self.source_dir: list[str] = []
+        self.domain = None
+        self.charset = None
+        self.dry_run = False
+
+    def finalize_options(self):
+        if not self.target_dir:
+            raise OptionError('you must specify the target directory (--target-dir)')
+        if not self.source_dir:
+            raise OptionError(
+                'you must specify at least one source directory (--source-dir)',
+            )
+
+    def run(self):
+        from babel.messages.commentmerge import TranslatorCommentMergePlan
+
+        plan = TranslatorCommentMergePlan(
+            self.target_dir,
+            self.source_dir,
+            domain=self.domain,
+            charset=self.charset,
+        )
+        print(plan.report())
+        if self.dry_run:
+            return
+        plan.apply()
+        print('Translator comments merged.')
+
+
 class CommandLineInterface:
     """Command-line interface.
 
@@ -1146,6 +1201,7 @@ class CommandLineInterface:
         'update': 'update existing message catalogs from a POT file',
         'concat': 'concatenates and merges the specified PO files',
         'merge': 'combines two PO files into one',
+        'merge-comments': 'merge translator comments from source PO directories into a target PO directory',
     }
 
     command_classes = {
@@ -1155,6 +1211,7 @@ class CommandLineInterface:
         'update': UpdateCatalog,
         'concat': ConcatenateCatalog,
         'merge': MergeCatalog,
+        'merge-comments': MergeComments,
     }
 
     log = None  # Replaced on instance level

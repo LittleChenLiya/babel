@@ -424,3 +424,112 @@ more productive.
 .. note:: Whether translator comments can be extracted depends on the extraction
           method in use. The Python extractor provided by Babel does implement
           this feature, but others may not.
+
+-----------------------------
+Merging Translator Comments
+-----------------------------
+
+When translations are maintained across multiple directories (for example
+several forks or branches of a project), translator comments (``#`` user
+comments) can diverge.  Babel provides an explicit, baseline-bound merge plan
+that collects translator comments from a set of source directories and
+merges them into a target directory, matching messages by their complete
+identity (the singular message id together with its optional context).
+
+The merge only ever touches translator comments:
+
+* automatic comments (``#.``),
+* source locations (``#:``), and
+* flags (``#,``)
+
+are never read from the sources and never written to the target's translator
+comments.  Translations and message ids are left unchanged.  When the same
+text appears as both a translator comment and an automatic comment, both are
+preserved as two independent comments of different types.
+
+The plan is bound to a baseline fingerprint of the target directory.  If the
+target directory changes between plan creation and application, the plan is
+rejected and nothing is written.
+
+Using the command line
+======================
+
+The ``merge-comments`` sub-command creates a plan, reports it, and applies it:
+
+.. code-block:: console
+
+    $ pybabel merge-comments -t translations/fr -s fork-a/fr -s fork-b/fr
+
+Use ``--dry-run`` (``-n``) to review the plan without applying it:
+
+.. code-block:: console
+
+    $ pybabel merge-comments -t translations/fr -s fork-a/fr -s fork-b/fr -n
+
+When the source and target directories contain several domains, restrict the
+merge to a single domain with ``--domain`` (``-d``):
+
+.. code-block:: console
+
+    $ pybabel merge-comments -t translations/fr -s fork-a/fr -d messages
+
+Using the Python API
+====================
+
+The :class:`~babel.messages.commentmerge.TranslatorCommentMergePlan` class
+builds the plan and exposes it for inspection before application:
+
+.. code-block:: python
+
+    from babel.messages.commentmerge import TranslatorCommentMergePlan
+
+    plan = TranslatorCommentMergePlan(
+        "translations/fr",
+        ["fork-a/fr", "fork-b/fr"],
+    )
+
+    # Review the plan before applying it.
+    print(plan.report())
+
+    # Apply the plan.  Raises MergePlanError if the target baseline changed.
+    plan.apply()
+
+The plan exposes the results of its analysis:
+
+* ``plan.conflicts`` -- complete message identities contributed by more than
+  one source directory (the comments are still deduplicated and merged);
+* ``plan.missing_targets`` -- identities found in the sources but not present
+  in the target directory (no comments are merged for these);
+* ``plan.changes`` -- the computed per-file changes, mapping each target file
+  to the merged translator comments of its messages.
+
+Conflicts and missing targets are reported centrally before application so
+that the plan can be reviewed.  They do not block application; only a changed
+target baseline does.
+
+Deduplication and order
+=======================
+
+Translator comments are merged in a stable, deterministic order: the target's
+existing comments come first (in their original order), followed by source
+comments in the order the source directories were given, then by file,
+message and comment order.  Duplicate comments are removed preserving
+first-seen order, so two identical translator comments from different
+directories appear only once in the merged result.
+
+Plural messages and messages with context are matched by their complete
+identity (singular id + context), so comments are attached to the correct
+message even when a singular and a plural message share the same singular id.
+
+Round-trip safety
+=================
+
+Applying a plan rewrites the target PO files using Babel's standard PO
+writer.  Reading a PO file, merging comments, writing it back and reading it
+again preserves translator comments, automatic comments, locations, flags,
+context and plural translations.  The round-trip is covered by the test
+suite; run it with:
+
+.. code-block:: console
+
+    $ pytest tests/messages/test_commentmerge.py
