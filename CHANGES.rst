@@ -1,6 +1,16 @@
 Babel Changelog
 ===============
 
+Unreleased
+----------
+
+Features
+~~~~~~~~
+
+* Messages: Add ``babel.messages.merge.TranslatorCommentMergePlan``, an explicit,
+  baseline-bound plan that merges translator comments from multiple catalogs by
+  full message identity with stable-order deduplication
+
 Version 2.18.0
 --------------
 

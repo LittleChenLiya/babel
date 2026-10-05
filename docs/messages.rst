@@ -424,3 +424,64 @@ more productive.
 .. note:: Whether translator comments can be extracted depends on the extraction
           method in use. The Python extractor provided by Babel does implement
           this feature, but others may not.
+
+
+.. _`merging translator comments`:
+
+Merging Translator Comments
+---------------------------
+
+When translations are maintained in several PO files at once (for example
+per-component catalogs that are combined for a release), translator comments
+tend to diverge even though they describe the same messages.  The
+:class:`babel.messages.merge.TranslatorCommentMergePlan` class provides an
+explicit, inspectable plan for merging translator comments (``#`` comments,
+stored as ``Message.user_comments``) from any number of source catalogs into
+one target catalog:
+
+.. code-block:: python
+
+    from babel.messages.merge import TranslatorCommentMergePlan
+
+    plan = TranslatorCommentMergePlan(target_catalog, [source_a, source_b])
+    for issue in plan.issues:          # centrally reported, before applying
+        print(issue)
+    for entry in plan.entries:         # preview of the merged comments
+        print(entry.id, entry.comments)
+    plan.apply()                       # only Message.user_comments changes
+
+The merge follows these rules:
+
+* Messages are matched by their *full message identity*: the complete
+  message ID (including the plural form for pluralizable messages) plus the
+  message context (``msgctxt``).  A singular message and a pluralizable
+  message with the same singular form are different identities.
+* Only translator comments are merged.  Automatic comments (``#.``), source
+  locations (``#:``) and flags (``#,``) are never mixed into translator
+  comments; a text that exists both as an automatic comment and as a
+  translator comment stays independent in each category.
+* Duplicate translator comments are removed with stable ordering: the
+  target's existing comments keep their order, then comments from the
+  source catalogs are appended in source order, keeping only the first
+  occurrence of each distinct text.
+* The plan is bound to a baseline fingerprint of the target catalog taken
+  when the plan is built.  If the target catalog changes before the plan is
+  applied, :meth:`~TranslatorCommentMergePlan.apply` refuses to run and
+  raises :class:`~babel.messages.merge.BaselineChangedError`.
+* Applying a plan never changes translations (``msgstr``) or message IDs
+  (``msgid``/``msgctxt``).
+* Source messages whose identity conflicts with the target identity, and
+  source messages that have no matching target message at all, are
+  collected centrally in ``plan.issues`` (as ``'conflict'`` and
+  ``'missing-target'`` issues) and reported together before anything is
+  applied; ``apply()`` raises
+  :class:`~babel.messages.merge.TranslatorCommentMergeError` while issues
+  are pending.
+
+The merge behavior is covered by a dedicated test module, including a PO
+round-trip test that writes catalogs to PO files, reads them back, merges
+and verifies the result.  Run it with:
+
+.. code-block:: console
+
+    $ python -m pytest tests/messages/test_merge.py babel/messages/merge.py -q
