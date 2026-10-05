@@ -19,7 +19,7 @@ from difflib import SequenceMatcher
 from email import message_from_string
 from heapq import nlargest
 from string import Formatter
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from babel import __version__ as VERSION
 from babel.core import Locale, UnknownLocaleError
@@ -36,6 +36,9 @@ __all__ = [
     'DEFAULT_HEADER',
     'PYTHON_FORMAT',
     'Catalog',
+    'FallbackEntry',
+    'FallbackReason',
+    'FallbackReport',
     'Message',
     'TranslationError',
 ]
@@ -327,6 +330,98 @@ class Message:
 class TranslationError(Exception):
     """Exception thrown by translation checkers when invalid message
     translations are encountered."""
+
+
+class FallbackReason:
+    """Reasons why a catalog entry may fall back to the message ID.
+
+    These are the values used in `FallbackEntry.reasons`:
+
+    * ``UNTRANSLATED``: no translation was ever provided for the message
+      (``message.string is None``).
+    * ``EMPTY``: the translation is an explicitly empty string.
+    * ``FUZZY``: the message is marked as "fuzzy"; a fuzzy translation is
+      not a usable finished translation.
+    * ``MISSING_PLURAL_SLOT``: one or more plural slots of a pluralizable
+      message are empty or missing; see `FallbackEntry.missing_slots` for
+      the affected slot numbers.
+    """
+
+    UNTRANSLATED = 'untranslated'
+    EMPTY = 'empty'
+    FUZZY = 'fuzzy'
+    MISSING_PLURAL_SLOT = 'missing-plural-slot'
+
+
+class FallbackEntry(NamedTuple):
+    """A single entry of a `FallbackReport`.
+
+    The entry only describes the message as found in the catalog; it never
+    carries an invented translation.
+    """
+
+    #: The message ID (a string, or a ``(singular, plural)`` tuple for
+    #: pluralizable messages).
+    id: str | tuple[str, ...]
+    #: The message context (``msgctxt``), or ``None``.  Together with
+    #: ``id`` this forms the identity of the message: the same ``msgid``
+    #: may appear once per context.
+    context: str | None
+    #: A tuple of `FallbackReason` values describing why the entry may
+    #: fall back to the message ID.
+    reasons: tuple[str, ...]
+    #: The numbers of the plural slots (``msgstr[N]``) that are empty or
+    #: missing; always empty for non-pluralizable messages.
+    missing_slots: tuple[int, ...]
+    #: Whether the entry would fall back to the message ID under the
+    #: caller's compile policy (see `Catalog.fallback_report`).
+    falls_back: bool
+    #: Whether the message is obsolete.
+    obsolete: bool
+
+
+class FallbackReport:
+    """A read-only report of the catalog entries that may fall back to the
+    message ID instead of a translation.
+
+    Instances of this class are created by `Catalog.fallback_report`.
+    Iterating over the report yields the entries of the active messages;
+    obsolete messages are listed separately in `FallbackReport.obsolete`.
+    """
+
+    def __init__(
+        self,
+        entries: Iterable[FallbackEntry] = (),
+        obsolete: Iterable[FallbackEntry] = (),
+        use_fuzzy: bool = False,
+    ) -> None:
+        #: The entries of the active messages, in catalog order.
+        self.entries: list[FallbackEntry] = list(entries)
+        #: The entries of the obsolete messages, in catalog order.
+        self.obsolete: list[FallbackEntry] = list(obsolete)
+        #: The compile policy the ``falls_back`` flags were computed with.
+        self.use_fuzzy: bool = use_fuzzy
+
+    def __iter__(self) -> Iterator[FallbackEntry]:
+        return iter(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __bool__(self) -> bool:
+        return bool(self.entries)
+
+    @property
+    def fallback_entries(self) -> list[FallbackEntry]:
+        """The active entries that would fall back to the message ID under
+        the caller's compile policy, in catalog order."""
+        return [entry for entry in self.entries if entry.falls_back]
+
+    def __repr__(self) -> str:
+        return (
+            f"<{type(self).__name__} {len(self.entries)} entries, "
+            f"{len(self.obsolete)} obsolete, use_fuzzy={self.use_fuzzy}>"
+        )
 
 
 DEFAULT_HEADER = """\
@@ -880,6 +975,106 @@ class Catalog:
             errors = message.check(catalog=self)
             if errors:
                 yield message, errors
+
+    def fallback_report(self, use_fuzzy: bool = False) -> FallbackReport:
+        """Build a read-only report of the entries that may fall back to the
+        message ID instead of a translation.
+
+        The report distinguishes untranslated messages (no translation was
+        ever provided), explicitly empty translations, fuzzy messages, and
+        pluralizable messages with missing plural slots (reported by slot
+        number).  Messages are identified by their ID *and* context, so the
+        same ``msgid`` may appear once per context.  Obsolete messages are
+        listed separately in `FallbackReport.obsolete`.  Both lists follow
+        the order of the catalog, and building the report never modifies
+        the catalog -- no translations are invented.
+
+        The ``falls_back`` flag of each entry mirrors the acceptance rules
+        of the actual compilation (see `babel.messages.mofile.write_mo`)
+        under the caller's policy: a message is compiled only if it has a
+        translation string and is either not fuzzy or ``use_fuzzy`` is
+        true; empty or missing plural slots fall back to the message ID
+        individually.  Fuzzy messages are always listed, even when
+        ``use_fuzzy`` allows them to be compiled -- a fuzzy translation is
+        not a usable finished translation.
+
+        >>> catalog = Catalog()
+        >>> catalog.mime_headers = [  # a catalog with three plural forms
+        ...     ('Plural-Forms', 'nplurals=3; plural=(n != 1);')]
+        >>> catalog.add('foo', '')  # explicitly empty translation
+        <Message ...>
+        >>> catalog.add('bar', 'Bar!', flags=['fuzzy'])
+        <Message ...>
+        >>> catalog.add(('apple', 'apples'), ('yabloko', '', 'yabloki'))
+        <Message ...>
+        >>> catalog.add('foo', context='menu')  # same msgid, other context
+        <Message ...>
+        >>> report = catalog.fallback_report()
+        >>> for entry in report:
+        ...     print(entry.id, entry.context, entry.reasons, entry.missing_slots, entry.falls_back)
+        foo None ('empty',) () True
+        bar None ('fuzzy',) () True
+        ('apple', 'apples') None ('missing-plural-slot',) (1,) True
+        foo menu ('untranslated',) () True
+
+        :param use_fuzzy: whether fuzzy translations should be considered
+                          acceptable, mirroring the ``use_fuzzy`` parameter
+                          of `babel.messages.mofile.write_mo`
+        :return: a `FallbackReport`
+        """
+        def classify(message: Message, obsolete: bool) -> FallbackEntry | None:
+            reasons = []
+            missing_slots = ()
+            if message.pluralizable:
+                strings = message.string
+                if not isinstance(strings, (list, tuple)):
+                    strings = ()
+                missing_slots = tuple(
+                    idx for idx in range(self.num_plurals)
+                    if idx >= len(strings) or not strings[idx]
+                )
+                if missing_slots:
+                    reasons.append(FallbackReason.MISSING_PLURAL_SLOT)
+            elif message.string is None:
+                reasons.append(FallbackReason.UNTRANSLATED)
+            elif not message.string:
+                reasons.append(FallbackReason.EMPTY)
+            if message.fuzzy:
+                reasons.append(FallbackReason.FUZZY)
+            if not reasons:
+                return None
+            if message.fuzzy and not use_fuzzy:
+                # Fuzzy messages are not compiled unless the caller
+                # explicitly opts in via ``use_fuzzy``.
+                falls_back = True
+            elif message.pluralizable:
+                # Empty or missing slots fall back to the message ID
+                # individually; a message without any string is not
+                # compiled at all.
+                falls_back = bool(missing_slots) or not message.string
+            else:
+                # Messages without a translation string are not compiled.
+                falls_back = not message.string
+            return FallbackEntry(
+                id=message.id,
+                context=message.context,
+                reasons=tuple(reasons),
+                missing_slots=missing_slots,
+                falls_back=falls_back,
+                obsolete=obsolete,
+            )
+
+        entries = []
+        for message in self._messages.values():
+            entry = classify(message, obsolete=False)
+            if entry is not None:
+                entries.append(entry)
+        obsolete_entries = []
+        for message in self.obsolete.values():
+            entry = classify(message, obsolete=True)
+            if entry is not None:
+                obsolete_entries.append(entry)
+        return FallbackReport(entries, obsolete_entries, use_fuzzy=use_fuzzy)
 
     def get(self, id: _MessageID, context: str | None = None) -> Message | None:
         """Return the message with the specified ID and context.
