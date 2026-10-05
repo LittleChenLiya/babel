@@ -13,9 +13,15 @@ from babel.messages.catalog import (
     Message,
     TranslationError,
 )
+from babel.messages.fallback import (
+    FallbackEntry,
+    list_fallbacks,
+)
 
 __all__ = [
     "Catalog",
+    "FallbackEntry",
     "Message",
     "TranslationError",
+    "list_fallbacks",
 ]

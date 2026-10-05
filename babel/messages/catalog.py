@@ -30,6 +30,8 @@ from babel.util import LOCALTZ, _cmp
 if TYPE_CHECKING:
     from typing_extensions import TypeAlias
 
+    from babel.messages.fallback import FallbackEntry
+
     _MessageID: TypeAlias = str | tuple[str, ...] | list[str]
 
 __all__ = [
@@ -1089,3 +1091,19 @@ class Catalog:
             if message_1 is None or message_2 is None or not message_1.is_identical(message_2):
                 return False
         return dict(self.mime_headers) == dict(other.mime_headers)
+
+    def list_fallbacks(
+        self,
+        use_fuzzy: bool = False,
+    ) -> tuple[list[FallbackEntry], list[FallbackEntry]]:
+        """Generate a read-only fallback list for this catalog.
+
+        This is a convenience wrapper around
+        :func:`babel.messages.fallback.list_fallbacks`.
+
+        :param use_fuzzy: whether fuzzy translations are considered usable
+        :return: a tuple of ``(entries, obsolete_entries)``
+        """
+        from babel.messages.fallback import list_fallbacks
+
+        return list_fallbacks(self, use_fuzzy=use_fuzzy)
